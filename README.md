@@ -37,7 +37,7 @@ pip install -r requirements.txt
 pip install pyMeow
 ```
 Это установит нам pyMeow (что в целом очевидно)  
-Если pyMeow не устанавливаете или чит не запускается, альтернатива:  
+Если pyMeow не устанавливается или чит не запускается, альтернатива:  
 Заходите и скачиваете [pyMeow](https://github.com/qb-0/pyMeow/releases), закидываете не разорхивируя к читу, в консоль:  
 ```
 pip install pyMeow-x.xx.xx.zip (подставьте название своего файла)
