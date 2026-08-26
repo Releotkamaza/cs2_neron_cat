@@ -4,31 +4,31 @@ import threading
 import time
 import win32api
 import os
-
 from functions import fontpaths
 
 ROOT_TAG = "neron_root_window"
 
 KeyNames = [
-    "OFF","VK_LBUTTON","VK_RBUTTON","VK_CANCEL","VK_MBUTTON","VK_XBUTTON1","VK_XBUTTON2","Unknown",
-    "VK_BACK","VK_TAB","Unknown","Unknown","VK_CLEAR","VK_RETURN","Unknown","Unknown","VK_SHIFT","VK_CONTROL","VK_MENU",
-    "VK_PAUSE","VK_CAPITAL","VK_KANA","Unknown","VK_JUNJA","VK_FINAL","VK_KANJI","Unknown","VK_ESCAPE","VK_CONVERT",
-    "VK_NONCONVERT","VK_ACCEPT","VK_MODECHANGE","VK_SPACE","VK_PRIOR","VK_NEXT","VK_END","VK_HOME","VK_LEFT","VK_UP",
-    "VK_RIGHT","VK_DOWN","VK_SELECT","VK_PRINT","VK_EXECUTE","VK_SNAPSHOT","VK_INSERT","VK_DELETE","VK_HELP",
-    "0","1","2","3","4","5","6","7","8","9",
-    "Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown",
-    "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
-    "VK_LWIN","VK_RWIN","VK_APPS","Unknown","VK_SLEEP",
-    "VK_NUMPAD0","VK_NUMPAD1","VK_NUMPAD2","VK_NUMPAD3","VK_NUMPAD4","VK_NUMPAD5","VK_NUMPAD6","VK_NUMPAD7","VK_NUMPAD8","VK_NUMPAD9",
-    "VK_MULTIPLY","VK_ADD","VK_SEPARATOR","VK_SUBTRACT","VK_DECIMAL","VK_DIVIDE",
-    "VK_F1","VK_F2","VK_F3","VK_F4","VK_F5","VK_F6","VK_F7","VK_F8","VK_F9","VK_F10","VK_F11","VK_F12",
-    "VK_F13","VK_F14","VK_F15","VK_F16","VK_F17","VK_F18","VK_F19","VK_F20","VK_F21","VK_F22","VK_F23","VK_F24",
-    "Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown",
-    "VK_NUMLOCK","VK_SCROLL",
-    "VK_OEM_NEC_EQUAL","VK_OEM_FJ_MASSHOU","VK_OEM_FJ_TOUROKU","VK_OEM_FJ_LOYA","VK_OEM_FJ_ROYA",
-    "Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown","Unknown",
-    "VK_LSHIFT","VK_RSHIFT","VK_LCONTROL","VK_RCONTROL","VK_LMENU","VK_RMENU"
+    "OFF ", "VK_LBUTTON ", "VK_RBUTTON ", "VK_CANCEL ", "VK_MBUTTON ", "VK_XBUTTON1 ", "VK_XBUTTON2 ", "Unknown ",
+    "VK_BACK ", "VK_TAB ", "Unknown ", "Unknown ", "VK_CLEAR ", "VK_RETURN ", "Unknown ", "Unknown ", "VK_SHIFT ", "VK_CONTROL ", "VK_MENU ",
+    "VK_PAUSE ", "VK_CAPITAL ", "VK_KANA ", "Unknown ", "VK_JUNJA ", "VK_FINAL ", "VK_KANJI ", "Unknown ", "VK_ESCAPE ", "VK_CONVERT ",
+    "VK_NONCONVERT ", "VK_ACCEPT ", "VK_MODECHANGE ", "VK_SPACE ", "VK_PRIOR ", "VK_NEXT ", "VK_END ", "VK_HOME ", "VK_LEFT ", "VK_UP ",
+    "VK_RIGHT ", "VK_DOWN ", "VK_SELECT ", "VK_PRINT ", "VK_EXECUTE ", "VK_SNAPSHOT ", "VK_INSERT ", "VK_DELETE ", "VK_HELP ",
+    "0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "7 ", "8 ", "9 ",
+    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
+    "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ", "K ", "L ", "M ", "N ", "O ", "P ", "Q ", "R ", "S ", "T ", "U ", "V ", "W ", "X ", "Y ", "Z ",
+    "VK_LWIN ", "VK_RWIN ", "VK_APPS ", "Unknown ", "VK_SLEEP ",
+    "VK_NUMPAD0 ", "VK_NUMPAD1 ", "VK_NUMPAD2 ", "VK_NUMPAD3 ", "VK_NUMPAD4 ", "VK_NUMPAD5 ", "VK_NUMPAD6 ", "VK_NUMPAD7 ", "VK_NUMPAD8 ", "VK_NUMPAD9 ",
+    "VK_MULTIPLY ", "VK_ADD ", "VK_SEPARATOR ", "VK_SUBTRACT ", "VK_DECIMAL ", "VK_DIVIDE ",
+    "VK_F1 ", "VK_F2 ", "VK_F3 ", "VK_F4 ", "VK_F5 ", "VK_F6 ", "VK_F7 ", "VK_F8 ", "VK_F9 ", "VK_F10 ", "VK_F11 ", "VK_F12 ",
+    "VK_F13 ", "VK_F14 ", "VK_F15 ", "VK_F16 ", "VK_F17 ", "VK_F18 ", "VK_F19 ", "VK_F20 ", "VK_F21 ", "VK_F22 ", "VK_F23 ", "VK_F24 ",
+    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
+    "VK_NUMLOCK ", "VK_SCROLL ",
+    "VK_OEM_NEC_EQUAL ", "VK_OEM_FJ_MASSHOU ", "VK_OEM_FJ_TOUROKU ", "VK_OEM_FJ_LOYA ", "VK_OEM_FJ_ROYA ",
+    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
+    "VK_LSHIFT ", "VK_RSHIFT ", "VK_LCONTROL ", "VK_RCONTROL ", "VK_LMENU ", "VK_RMENU "
 ]
+
 
 class NERON_GUI:
     def __init__(self, config, runtime):
@@ -38,6 +38,8 @@ class NERON_GUI:
         self.viewport_width = 900
         self.viewport_height = 650
         self.root_window = None
+        self._esp_master_cb = None
+        self._trigger_enable_cb = None
         self.config = config
         self.control_width = 250
         self.card_padding = 3
@@ -139,7 +141,6 @@ class NERON_GUI:
     def keybind_use(self, sender, app_data, user_data):
         key_id = user_data
         dpg.set_item_label(sender, "...")
-
         waiting = True
         delay_counter = 0
 
@@ -156,6 +157,7 @@ class NERON_GUI:
                             waiting = False
                             self._config_set(key_id, i)
                             return
+
         threading.Thread(target=capture_key, daemon=True).start()
 
     def _key_label(self, key_code):
@@ -197,9 +199,9 @@ class NERON_GUI:
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBg, self.palette["frame"])
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, self.palette["frame_hover"])
                 dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, self.palette["frame_active"])
-                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, self.palette["panel"])
-                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, self.palette["panel"])
-                dpg.add_theme_color(dpg.mvThemeCol_TitleBgCollapsed, self.palette["panel"])
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (28, 20, 46, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (28, 20, 46, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgCollapsed, (28, 20, 46, 255))
                 dpg.add_theme_color(dpg.mvThemeCol_Button, self.palette["frame"])
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, self.palette["accent_soft"])
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, self.palette["accent"])
@@ -231,6 +233,7 @@ class NERON_GUI:
         dpg.bind_theme(theme)
 
     def lerp(self, a, b, t): return a + (b - a) * t
+
     def is_dragging(self, _, data):
         if dpg.is_mouse_button_down(0):
             y = data[1]
@@ -240,6 +243,7 @@ class NERON_GUI:
         else:
             self.ui_dragging = False
             if not dpg.is_viewport_vsync_on(): dpg.set_viewport_vsync(True)
+
     def drag_logic(self, _, data):
         self.n += 1
         if self.n % 30 != 0: return
@@ -257,15 +261,38 @@ class NERON_GUI:
 
     def run(self):
         dpg.show_viewport()
+        try:
+            dpg.set_render_callback(self._on_render)
+        except Exception:
+            pass
         dpg.start_dearpygui()
         dpg.destroy_context()
+        
+    def _sync_external(self):
+        """Подтягивает в виджеты значения, изменённые из других процессов (хоткеи)."""
+        pairs = (
+            (self._esp_master_cb, "EnableESP", True),
+            (self._trigger_enable_cb, "EnableTriggerbot", True),
+        )
+        for tag, key, default in pairs:
+            if tag:
+                try:
+                    want = bool(self.config.get(key, default))
+                    if bool(dpg.get_value(tag)) != want:
+                        dpg.set_value(tag, want)
+                except Exception:
+                    pass
+
+    def _on_render(self, sender=None, app_data=None):
+        self._sync_external()
+        dpg.render_dearpygui_frame()
 
     def _on_toggle_spectators(self, sender, value):
         self._config_set("EnableShowSpectators", bool(value))
 
     def build_ui(self):
         with dpg.window(
-            label="NERON v1.0 - developed by khorami.dev",
+            label="NERON_CAT - developed by Releotkamaza",
             width=self.viewport_width,
             height=self.viewport_height,
             no_move=True,
@@ -276,11 +303,34 @@ class NERON_GUI:
         ) as root:
             self.root_window = root
 
+            # Градиент-подложка: drawlist высотой 1px не ломает layout,
+            # полосы рисуем координатами, не доходя до краёв (pad=-12).
+            with dpg.drawlist(parent=root, width=self.viewport_width, height=1):
+                bands = 36
+                top_c = (28, 20, 46)
+                bot_c = self.palette["background"][:3]
+                pad = -12
+                full_h = self.viewport_height + pad
+                band_h = full_h / float(bands)
+                for i in range(bands):
+                    t = i / max(1, bands - 1)
+                    r = int(round(self.lerp(top_c[0], bot_c[0], t)))
+                    g = int(round(self.lerp(top_c[1], bot_c[1], t)))
+                    b = int(round(self.lerp(top_c[2], bot_c[2], t)))
+                    y0 = int(round(i * band_h)) - pad
+                    y1 = int(round((i + 1) * band_h)) - pad + 1
+                    dpg.draw_rectangle(
+                        (-pad, y0),
+                        (self.viewport_width + pad, y1),
+                        color=(0, 0, 0, 0),
+                        fill=(r, g, b, 255),
+                        thickness=0.0,
+                    )
+
             header_group = dpg.add_group()
             dpg.add_text("Control Panel", color=self.palette["accent"], parent=header_group)
             dpg.add_spacer(height=2, parent=header_group)
             dpg.add_separator(parent=header_group)
-
             with dpg.tab_bar():
                 self._build_tab_aimbot()
                 self._build_tab_visuals()
@@ -311,59 +361,56 @@ class NERON_GUI:
 
     def _build_tab_aimbot(self):
         with dpg.tab(label="Aimbot"):
-            card = self._tab_card("Aimbot Suite", "Curate how the helper locks and eases onto targets.")
-            self._config_checkbox("Enable Aimbot", "EnableAimbot", parent=card)
-            self._config_checkbox("Team Check##Aimbot", "EnableAimbotTeamCheck", parent=card)
-            self._config_checkbox("Visibility Check", "EnableAimbotVisibilityCheck", parent=card)
+            card = self._tab_card("Настройки Aimbot'а", "Облегчение наведения на противников.")
+            self._config_checkbox("Включение Aimbot'а", "EnableAimbot", parent=card)
+            self._config_checkbox("Проверка на тиммейта##Aimbot", "EnableAimbotTeamCheck", parent=card)
+            self._config_checkbox("Проверка на видимость", "EnableAimbotVisibilityCheck", parent=card)
             self._config_slider_int("Aimbot FOV", "AimbotFOV", 90, 50, 200, parent=card)
-            self._config_slider_int("Aimbot Smoothing", "AimbotSmoothing", 5, 1, 10, parent=card)
-            self._config_checkbox("Prediction (Velocity-based)", "EnableAimbotPrediction", parent=card)
-            self._config_combo("Aim Position", "AimPosition", ["Head", "Neck", "Torso", "Leg"], "Head", parent=card)
+            self._config_slider_int("Сглаживание Aimbot'а", "AimbotSmoothing", 5, 1, 10, parent=card)
+            self._config_checkbox("Предсказание (на основе скорости)", "EnableAimbotPrediction", parent=card)
+            self._config_combo("Позиция Aim'а", "AimPosition", ["Head", "Neck", "Torso", "Leg"], "Head", parent=card)
             dpg.add_spacer(height=8, parent=card)
             self._config_hotkey("Aimbot Hotkey", "AimbotKey", parent=card)
 
     def _build_tab_visuals(self):
         with dpg.tab(label="ESP & Visuals"):
-            card = self._tab_card("ESP & Visuals", "Configure intel overlays for story or squad practice.")
-
+            card = self._tab_card("ESP & Visuals", "Настройки ESP и вывода информации.")
+            self._esp_master_cb = self._config_checkbox("Включение ESP", "EnableESP", default=True, parent=card)
+            self._config_hotkey("ESP Hotkey (вкл/выкл)", "ESPMasterKey", parent=card)
+            dpg.add_spacer(height=6, parent=card)
             with dpg.group(horizontal=True, horizontal_spacing=18, parent=card):
                 left_col = dpg.add_child_window(width=int(self.viewport_width*0.30), autosize_y=True, no_scrollbar=True, border=True)
                 right_col = dpg.add_child_window(width=int(self.viewport_width*0.60), autosize_y=True, no_scrollbar=True, border=True)
-
                 dpg.add_text("Renderers", color=self.palette["text_muted"], parent=left_col)
                 with dpg.group(horizontal=True, horizontal_spacing=24, parent=left_col):
                     r1c1 = dpg.add_group()
                     r1c2 = dpg.add_group()
                     self._config_checkbox("Skeleton", "EnableESPSkeletonRendering", parent=r1c1)
                     self._config_checkbox("Box", "EnableESPBoxRendering", parent=r1c1)
-                    self._config_checkbox("Visible check", "ESP_VisibleCheckBox", parent=r1c2)
-                    self._config_checkbox("Tracer", "EnableESPTracerRendering", parent=r1c2)
-                    self._config_checkbox("Team Check", "EnableESPTeamCheck", parent=r1c2)
-
-             
-
+                    self._config_checkbox("Проверка на видимость", "ESP_VisibleCheckBox", parent=r1c2)
+                    self._config_checkbox("Трейсеры", "EnableESPTracerRendering", parent=r1c2)
+                    self._config_checkbox("Проверка на тиммейта", "EnableESPTeamCheck", parent=r1c2)
                 dpg.add_spacer(height=6, parent=left_col)
                 dpg.add_text("Labels", color=self.palette["text_muted"], parent=left_col)
                 with dpg.group(horizontal=True, horizontal_spacing=24, parent=left_col):
                     r2c1 = dpg.add_group()
                     r2c2 = dpg.add_group()
-                    self._config_checkbox("Name", "EnableESPNameText", parent=r2c1)
-                    self._config_checkbox("Distance", "EnableESPDistanceText", parent=r2c1)
-                    self._config_checkbox("Health Text", "EnableESPHealthText", parent=r2c2)
-                    self._config_checkbox("Health Bar", "EnableESPHealthBarRendering", parent=r2c2)
-
-                dpg.add_text("Styling & Thickness", color=self.palette["text_muted"], parent=right_col)
+                    self._config_checkbox("Имя", "EnableESPNameText", parent=r2c1)
+                    self._config_checkbox("Дистанция", "EnableESPDistanceText", parent=r2c1)
+                    self._config_checkbox("Вывод HP", "EnableESPHealthText", parent=r2c2)
+                    self._config_checkbox("HP Bar", "EnableESPHealthBarRendering", parent=r2c2)
+                dpg.add_text("Визуал и толщина", color=self.palette["text_muted"], parent=right_col)
                 dpg.add_spacer(height=2, parent=right_col)
-                dpg.add_text("Health Synchronization", color=self.palette["text_subtle"], parent=right_col)
-                self._config_checkbox("Skeleton follows health", "ESP_HealthSyncSkeleton", default=True, parent=right_col)
-                self._config_checkbox("Health bar follows health", "ESP_HealthSyncBar", default=True, parent=right_col)
+                dpg.add_text("Синхронизация с HP", color=self.palette["text_subtle"], parent=right_col)
+                self._config_checkbox("Skeleton базируется на HP", "ESP_HealthSyncSkeleton", default=True, parent=right_col)
+                self._config_checkbox("HP Bar базируется на HP", "ESP_HealthSyncBar", default=True, parent=right_col)
                 dpg.add_spacer(height=6, parent=right_col)
                 dpg.add_separator(parent=right_col)
                 dpg.add_spacer(height=6, parent=right_col)
-                dpg.add_text("Thickness", color=self.palette["text_subtle"], parent=right_col)
-                s1 = self._config_slider_float("Skeleton scale", "ESP_SkeletonThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
-                s2 = self._config_slider_float("Box scale", "ESP_BoxThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
-                s3 = self._config_slider_float("Health bar width", "ESP_HealthBarThicknessScale", 1.0, 0.6, 1.6, parent=right_col)
+                dpg.add_text("Толщина", color=self.palette["text_subtle"], parent=right_col)
+                s1 = self._config_slider_float("Размер Skeleton", "ESP_SkeletonThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
+                s2 = self._config_slider_float("Размер Box", "ESP_BoxThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
+                s3 = self._config_slider_float("Толщина HP Bar", "ESP_HealthBarThicknessScale", 1.0, 0.6, 1.6, parent=right_col)
                 try:
                     dpg.configure_item(s1, width=int(self.control_width*1.4))
                     dpg.configure_item(s2, width=int(self.control_width*1.4))
@@ -373,31 +420,30 @@ class NERON_GUI:
 
     def _build_tab_triggerbot(self):
         with dpg.tab(label="Triggerbot"):
-            card = self._tab_card("Triggerbot", "Automate shots only when the scenario is right.")
-            self._config_checkbox("Enable Trigger Bot", "EnableTriggerbot", parent=card)
-            self._config_checkbox("Team Check##Triggerbot", "EnableTriggerbotTeamCheck", parent=card)
-            self._config_checkbox("Key Check", "EnableTriggerbotKeyCheck", parent=card)
+            card = self._tab_card("Triggerbot", "Автоматический выстрел при наведении на врага.")
+            self._trigger_enable_cb = self._config_checkbox("Включение triggerbot", "EnableTriggerbot", parent=card)
+            self._config_checkbox("Проверка на тиммейта##Triggerbot", "EnableTriggerbotTeamCheck", parent=card)
+            self._config_checkbox("Проверка кнопки", "EnableTriggerbotKeyCheck", parent=card)
             dpg.add_spacer(height=8, parent=card)
-            self._config_hotkey("Triggerbot Hotkey", "TriggerbotKey", parent=card)
+            self._config_hotkey("Кнопка triggerbot", "TriggerbotKey", parent=card)
             dpg.add_spacer(height=8, parent=card)
-            self._config_checkbox("Require Ground (only shoot when on ground)", "TriggerbotRequireGround", default=True, parent=card)
-            self._config_slider_float("Speed Threshold (units/sec, 0 = off)", "TriggerbotSpeedThreshold", 5.0, 0.0, 200.0, parent=card, format="%.1f")
-            self._config_checkbox("Wallbang Mode (shoot through walls)", "TriggerbotWallbang", default=False, parent=card)           
-
+            self._config_checkbox("Проверка на землю (стрельба только на земле)", "TriggerbotRequireGround", default=True, parent=card)
+            self._config_slider_float("Проверка скорости (стрельба при скорости ниже)", "TriggerbotSpeedThreshold", 5.0, 0.0, 200.0, parent=card, format="%.1f")
+            self._config_checkbox("Wallbang (аволл) режим", "TriggerbotWallbang", default=False, parent=card)
 
     def _build_tab_recoil(self):
-        with dpg.tab(label="Recoil Control"):
-            card = self._tab_card("Recoil Control", "Balance recoil assistance for reliable tracking.")
-            self._config_checkbox("Enable Recoil Control", "EnableRecoilControl", parent=card)
-            self._config_slider_float("Recoil Control Smoothing", "RecoilControlSmoothing", 1.5, 1.0, 3.0, parent=card, format="%.2f")
+        with dpg.tab(label="Контроль отдачи"):
+            card = self._tab_card("Контроль отдачи", "Контроль отдачи оружия.")
+            self._config_checkbox("Включение контроля отдачи", "EnableRecoilControl", parent=card)
+            self._config_slider_float("Плавность контроля отдачи", "RecoilControlSmoothing", 1.5, 1.0, 3.0, parent=card, format="%.2f")
 
     def _build_tab_colors(self):
-        with dpg.tab(label="Colors"):
-            card = self._tab_card("Color Palette", "Tweak visual cues so silhouettes stay readable.")
+        with dpg.tab(label="Цвета"):
+            card = self._tab_card("Настройки цвета", "Изменение цвета для отдельных функций.")
             ct_color = self._config_get("CT_color", "#4DA2FF") or "#4DA2FF"
             t_color = self._config_get("T_color", "#FF6A5A") or "#FF6A5A"
             fov_color = self._config_get("FOV_color", "#FF3F88") or "#FF3F88"
-            dpg.add_text("Player Colors", color=self.palette["text_muted"], parent=card)
+            dpg.add_text("Цвета игроков", color=self.palette["text_muted"], parent=card)
             dpg.add_spacer(height=4, parent=card)
             with dpg.group(horizontal=True, horizontal_spacing=18, parent=card):
                 dpg.add_color_picker(
@@ -539,34 +585,23 @@ class NERON_GUI:
         self._config_set(key, value)
 
     def _build_tab_misc(self):
-        with dpg.tab(label="Misc"):
-            card = self._tab_card("Utilities", "Quality-of-life toggles and quick boosts.")
-            self._config_checkbox("Enable Bomb Timer", "EnableESPBombTimer", parent=card)
-            self._config_checkbox("Enable Anti Flashbang", "EnableAntiFlashbang", parent=card)
-            self._config_checkbox("Enable Bhop", "EnableBhop", parent=card)
-            self._config_checkbox("Enable Auto Accept (lobby only)", "EnableAutoAccept", parent=card)
-            
-            self._config_checkbox("Enable Discord RPC", "EnableDiscordRPC", parent=card)
-            
+        with dpg.tab(label="Прочее"):
+            card = self._tab_card("Прочее", "Прочие различные настройки.")
+            self._config_checkbox("Включение таймера бомбы", "EnableESPBombTimer", parent=card)
+            self._config_checkbox("Включение Антифлеша", "EnableAntiFlashbang", parent=card)
+            self._config_checkbox("Включение бхопа", "EnableBhop", parent=card)
+            self._config_checkbox("Включение автопринятия матча", "EnableAutoAccept", parent=card)
+            self._config_checkbox("Включение Discord RPC", "EnableDiscordRPC", parent=card)
             dpg.add_checkbox(
-                label="Show Spectators Watching Me (in-game)",
+                label="Список наблюдателей (в матче)",
                 default_value=self.config.get("EnableShowSpectators", False),
                 callback=self._on_toggle_spectators,
                 parent=card,
             )
-            
-            self._config_checkbox("Enable FOV Changer", "EnableFovChanger", parent=card)
-            self._config_slider_int("Set FOV", "FovChangeSize", 90, 50, 170, parent=card)
-                       
-    
-    def _build_tab_recoil(self):
-        with dpg.tab(label="Recoil Control"):
-            card = self._tab_card("Recoil Control", "Balance recoil assistance for reliable tracking.")
-            self._config_checkbox("Enable Recoil Control", "EnableRecoilControl", parent=card)
-            self._config_slider_float("Recoil Control Smoothing", "RecoilControlSmoothing", 1.5, 1.0, 3.0, parent=card, format="%.2f")
+            self._config_checkbox("Включить изменение угла обзора", "EnableFovChanger", parent=card)
+            self._config_slider_int("Угол обзора", "FovChangeSize", 90, 50, 170, parent=card)
 
 
 def run_gui(Options, Runtime):
     gui = NERON_GUI(Options, Runtime)
     gui.run()
-
