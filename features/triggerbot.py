@@ -7,7 +7,6 @@ import time
 import math
 import gc
 
-trigger_toggle_state = False
 prev_key_state = False
 
 
@@ -137,9 +136,17 @@ def angle_difference(angle1, angle2):
 
 def TriggerbotThreadFunction(Options, Offsets):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
-    global trigger_toggle_state, prev_key_state
+    global prev_key_state
 
-    # FOV автоволла - всегда адаптивный (статичного больше нет)
+    # При включённом Key Check стартуем "разоружёнными": состояние теперь
+    # живёт в общем конфиге (EnableTriggerbot), а не во внутренней переменной.
+    try:
+        if to_bool(Options.get("EnableTriggerbotKeyCheck", True), True):
+            Options["EnableTriggerbot"] = False
+    except Exception:
+        pass
+
+    # FOV автоволла - всегда адаптивный
     wallbang_fov_points = [
         (0.0, 2.1),
         (120.0, 1.5),
@@ -178,6 +185,16 @@ def TriggerbotThreadFunction(Options, Offsets):
                 gc.collect()
                 last_gc_time = now
 
+            # Хоткей читается ДО проверки общего включения - иначе он не смог бы
+            # включить триггер обратно. Нажатие переключает общий EnableTriggerbot
+            # (галочка в GUI синхронизируется через _sync_external).
+            if to_bool(Options.get("EnableTriggerbotKeyCheck", True), True):
+                key_code = Options.get("TriggerbotKey", 17)
+                current_state = bool(win32api.GetAsyncKeyState(key_code) & 0x8000)
+                if current_state and not prev_key_state:
+                    Options["EnableTriggerbot"] = not to_bool(Options.get("EnableTriggerbot", False), False)
+                prev_key_state = current_state
+
             if not to_bool(Options.get("EnableTriggerbot", False), False):
                 time.sleep(0.05)
                 continue
@@ -187,16 +204,6 @@ def TriggerbotThreadFunction(Options, Offsets):
             if not process or not client:
                 time.sleep(0.05)
                 continue
-
-            if to_bool(Options.get("EnableTriggerbotKeyCheck", True), True):
-                key_code = Options.get("TriggerbotKey", 17)
-                current_state = bool(win32api.GetAsyncKeyState(key_code) & 0x8000)
-                if current_state and not prev_key_state:
-                    trigger_toggle_state = not trigger_toggle_state
-                prev_key_state = current_state
-                if not trigger_toggle_state:
-                    time.sleep(0.01)
-                    continue
 
             if win32gui.GetWindowText(win32gui.GetForegroundWindow()) != "Counter-Strike 2":
                 time.sleep(0.02)
@@ -224,9 +231,7 @@ def TriggerbotThreadFunction(Options, Offsets):
                 local_origin.z + view_offset.z
             )
 
-            # Переключатель читается свежим каждый цикл
             wallbang_mode = to_bool(Options.get("TriggerbotWallbang", False), False)
-
             team_check = to_bool(Options.get("EnableTriggerbotTeamCheck", False), False)
             require_ground = to_bool(Options.get("TriggerbotRequireGround", True), True)
             speed_threshold = to_float(Options.get("TriggerbotSpeedThreshold", 5.0), 5.0)

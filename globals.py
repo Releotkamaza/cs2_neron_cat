@@ -39,6 +39,7 @@ CHEAT_SETTINGS = {
     "AdaptiveWallbang": True,
     "EnableTriggerbotTeamCheck": False,
 
+    "EnableESP": True,
     "EnableESPDistanceRendering": True,
     "EnableESPTeamCheck": False,
     "EnableESPSkeletonRendering": True,

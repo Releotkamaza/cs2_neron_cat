@@ -70,7 +70,7 @@ def moveMouseToLocation(pos: Vector2):
     center_of_screen = Vector2(SCREEN_WIDTH / 2.0, SCREEN_HEIGHT / 2.0)
     dx = int(pos.x - center_of_screen.x)
     dy = int(pos.y - center_of_screen.y)
-    ctypes.windll.user32.mouse_event(0x0001, dx, dy, 0, 0)  # MOUSEEVENTF_MOVE
+    ctypes.windll.user32.mouse_event(0x0001, dx, dy, 0, 0)
 
 
 def getCurrentMousePosition():

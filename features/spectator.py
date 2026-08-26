@@ -342,11 +342,6 @@ def render_spectator_block(
     font_size=16,
     font_id=None
 ):
-    """
-    Постоянная табличка, но рисуются ТОЛЬКО "ESP-безопасные" вызовы:
-    draw_rectangle / draw_rectangle_lines / draw_font (raylib).
-    Никакого measure_text, push/pop шрифтов и ImGui-шрифта - именно они текли.
-    """
     try:
         if not enabled or not spectators:
             return
@@ -390,20 +385,17 @@ def render_spectator_block(
         pme.draw_rectangle_lines(x, y, block_w, block_h, cols["border"], lineThick=1)
         pme.draw_rectangle(x, y, 3, block_h, cols["accent"])
 
-        if font_id is not None and hasattr(pme, "draw_font"):
-            pme.draw_font(fontId=font_id, text=title, posX=x + pad_x, posY=y + pad_y,
-                          fontSize=title_size, spacing=0, tint=cols["title"])
-            pme.draw_font(fontId=font_id, text=line, posX=x + pad_x, posY=y + pad_y + title_size + 6,
-                          fontSize=name_size, spacing=0, tint=cols["name"])
-        else:
-            def _safe(t):
-                try:
-                    t.encode("ascii")
-                    return t
-                except Exception:
-                    return "".join(ch if ord(ch) < 128 else "?" for ch in t)
-            pme.draw_text(_safe(title), x + pad_x, y + pad_y, fontSize=title_size, color=cols["title"])
-            pme.draw_text(_safe(line), x + pad_x, y + pad_y + title_size + 6, fontSize=name_size, color=cols["name"])
+        try:
+            # Единый путь: ASCII - raylib, кириллица - текстура (PIL), фолбэк - транслит
+            from features.esp.fonts import draw_text as _fd
+            _fd(title, x + pad_x, y + pad_y, size=title_size, color=cols["title"])
+            _fd(line, x + pad_x, y + pad_y + title_size + 6, size=name_size, color=cols["name"])
+        except Exception:
+            if font_id is not None and hasattr(pme, "draw_font"):
+                pme.draw_font(fontId=font_id, text=title, posX=x + pad_x, posY=y + pad_y,
+                              fontSize=title_size, spacing=0, tint=cols["title"])
+                pme.draw_font(fontId=font_id, text=line, posX=x + pad_x, posY=y + pad_y + title_size + 6,
+                              fontSize=name_size, spacing=0, tint=cols["name"])
     except Exception as e:
         try:
             _log(1, f"[overlay/spec] draw error: {e}")

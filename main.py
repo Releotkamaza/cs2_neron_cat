@@ -71,7 +71,16 @@ def LoadConfig():
             globals.CHEAT_SETTINGS = json.load(fp)
 
 if __name__ == "__main__":
-    print(" _   _ ______ _____   ____  _   _ \n| \\ | |  ____|  __ \\ / __ \\| \\ | |\n|  \\| | |__  | |__) | |  | |  \\| |\n| . ` |  __| |  _  /| |  | | . ` |\n| |\\  | |____| | \\ \\| |__| | |\\  |\n|_| \\_|______|_|  \\_\\\\____/|_| \\_|\n\n             - NERON_CAT v0.8.1\n             - https://github.com/Releotkamaza/cs2_neron_cat")
+    print("      ::::    ::: :::::::::: :::::::::   ::::::::  ::::    :::            ::::::::      ::: ::::::::::: \n"
+          "     :+:+:   :+: :+:        :+:    :+: :+:    :+: :+:+:   :+:           :+:    :+:   :+: :+:   :+:      \n"
+          "    :+:+:+  +:+ +:+        +:+    +:+ +:+    +:+ :+:+:+  +:+           +:+         +:+   +:+  +:+       \n"
+          "   +#+ +:+ +#+ +#++:++#   +#++:++#:  +#+    +:+ +#+ +:+ +#+           +#+        +#++:++#++: +#+        \n"
+          "  +#+  +#+#+# +#+        +#+    +#+ +#+    +#+ +#+  +#+#+#           +#+        +#+     +#+ +#+         \n"
+          " #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#   #+#+#           #+#    #+# #+#     #+# #+#          \n"
+          "###    #### ########## ###    ###  ########  ###    #### ########## ########  ###     ### ###           \n"
+          "\n"
+          "             - NERON v0.9.1\n"
+          "             - https://github.com/Releotkamaza/cs2_neron_cat")  
     
     win32process.SetPriorityClass(
         win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, True, win32api.GetCurrentProcessId()),
@@ -198,6 +207,18 @@ if __name__ == "__main__":
             logutil.debug("[main] overlay loop entered; Spec List will be drawn from features/esp.py.")
             logutil.debug("[main] rendering Spec List on the game frame (inside ESP begin/end drawing)")
             overlay_logged_once = True
+            esp_key_prev = False
+            
+        # ESP master hotkey: нажал - включил, ещё раз - выключил (синхронно с GUI)
+        try:
+            esp_key_code = int(SharedOptions.get("ESPMasterKey", 0) or 0)
+        except Exception:
+            esp_key_code = 0
+        if esp_key_code > 0:
+            esp_key_now = bool(win32api.GetAsyncKeyState(esp_key_code) & 0x8000)
+            if esp_key_now and not esp_key_prev:
+                SharedOptions["EnableESP"] = not bool(SharedOptions.get("EnableESP", True))
+            esp_key_prev = esp_key_now
         
         try:
             esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState, SharedRuntime)

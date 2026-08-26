@@ -84,22 +84,38 @@ def draw_text(text, x, y, *, size, color):
     except Exception:
         col = color
     xi = int(round(x)); yi = int(round(y)); sz = max(10, int(round(size)))
+    s = str(text)
+
+    # Кириллица: raylib-шрифт без неё -> рисуем текстурой (PIL),
+    # а если недоступно - транслит как фолбэк.
+    if any(ord(ch) > 126 for ch in s):
+        try:
+            from functions import textrender
+            if textrender.draw_unicode(pme, s, xi, yi, sz, col):
+                return
+        except Exception:
+            pass
+        try:
+            from functions.translit import translit
+            s = translit(s)
+        except Exception:
+            pass
+
     font_id = _ensure_raylib_font()
     if font_id is not None:
         try:
-            pme.draw_font(fontId=font_id, text=str(text), posX=xi, posY=yi, fontSize=sz, spacing=0, tint=col)
+            pme.draw_font(fontId=font_id, text=s, posX=xi, posY=yi, fontSize=sz, spacing=0, tint=col)
             return
         except Exception:
             pass
     font_handle = _get_overlay_font_handle(sz)
     if font_handle:
         try:
-            pme.draw_text(text, xi, yi, fontSize=sz, color=col, font=font_handle)
+            pme.draw_text(s, xi, yi, fontSize=sz, color=col, font=font_handle)
             return
         except Exception:
             pass
     try:
-        pme.draw_text(text, xi, yi, fontSize=sz, color=col)
+        pme.draw_text(s, xi, yi, fontSize=sz, color=col)
     except Exception:
         pass
-

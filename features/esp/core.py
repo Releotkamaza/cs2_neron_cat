@@ -105,7 +105,21 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     opt_team_check = Options.get("EnableESPTeamCheck", False)
     opt_visible_box = Options.get("ESP_VisibleCheckBox", False)
 
+    # Центральный переключатель ESP: гасит ТОЛЬКО функции вкладки
+    # "ESP & Visuals". Зрители и бомба-таймер (Misc) продолжают работать.
+    if not bool(Options.get("EnableESP", True)):
+        opt_box = False
+        opt_name = False
+        opt_distance = False
+        opt_health_text = False
+        opt_health_bar = False
+        opt_tracer = False
+        opt_skeleton = False
+        opt_visible_box = False
+        opt_team_check = False
+
     render_required = any((opt_box, opt_name, opt_distance, opt_health_text, opt_health_bar, opt_tracer, opt_skeleton))
+
 
     ct_color = Options.get("CT_color", "#4DA2FF")
     t_color = Options.get("T_color", "#FF6A5A")
