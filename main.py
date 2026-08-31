@@ -12,6 +12,7 @@ from features import triggerbot
 from features import bhop
 from features import discodrpc
 from features import spectator
+from features import nosmoke
 from GUI import gui_mainloop
 from GUI import gui_util
 import multiprocessing
@@ -23,7 +24,6 @@ import keyboard, os, json
 import gc
 from functions.process_watcher import ProcessConnector
 
-keyboard.add_hotkey("end", callback=lambda: os._exit(0))
 keyboard.add_hotkey("insert", callback=lambda: gui_util.hide_dpg())
 keyboard.add_hotkey("home", callback=lambda: gui_util.streamproof_toggle())
 
@@ -104,6 +104,24 @@ if __name__ == "__main__":
     ProcessObject = connector.ensure_process()
     ClientModuleAddress = connector.ensure_module("client.dll")
     
+    def _clean_exit():
+        # Возвращаем FOV по умолчанию, чтобы после выхода игра не оставалась "с нашим FOV"
+        try:
+            off = globals.GAME_OFFSETS.offset
+            p = connector.ensure_process()
+            c = connector.ensure_module("client.dll")
+            if p and c:
+                lp = memfuncs.ProcMemHandler.ReadPointer(p, c + off.dwLocalPlayerPawn)
+                if lp:
+                    cam = memfuncs.ProcMemHandler.ReadPointer(p, lp + off.m_pCameraServices)
+                    if cam:
+                        memfuncs.ProcMemHandler.WriteInt(p, cam + off.m_iFOV, 90)
+        except Exception:
+            pass
+        os._exit(0)
+
+    keyboard.add_hotkey("end", callback=_clean_exit)
+    
     # Config
     LoadConfig()
     
@@ -172,6 +190,15 @@ if __name__ == "__main__":
     discord_rpc_proc = multiprocessing.Process(target=discodrpc.DiscordRpcThread, args=(SharedOptions,))
     discord_rpc_proc.daemon = True
     discord_rpc_proc.start()
+    
+    # No Smoke (separate worker)
+    NoSmoke_proc = multiprocessing.Process(
+        target=nosmoke.NoSmokeThreadFunction,
+        args=(SharedOptions, SharedOffsets, SharedRuntime,)
+    )
+    NoSmoke_proc.daemon = True
+    NoSmoke_proc.start()
+    logutil.debug("[main] nosmoke worker: started")
     
     # Spectator monitor
     Spectator_proc = multiprocessing.Process(

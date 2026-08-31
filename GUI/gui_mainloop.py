@@ -587,9 +587,11 @@ class NERON_GUI:
     def _build_tab_misc(self):
         with dpg.tab(label="Прочее"):
             card = self._tab_card("Прочее", "Прочие различные настройки.")
+            self._config_checkbox("Убрать чёрный скоуп (AWP/SSG)", "EnableNoScopeOverlay", parent=card)
             self._config_checkbox("Включение таймера бомбы", "EnableESPBombTimer", parent=card)
             self._config_checkbox("Включение Антифлеша", "EnableAntiFlashbang", parent=card)
             self._config_checkbox("Включение бхопа", "EnableBhop", parent=card)
+            self._config_checkbox("Удаление смоков", "EnableNoSmoke", parent=card)
             self._config_checkbox("Включение автопринятия матча", "EnableAutoAccept", parent=card)
             self._config_checkbox("Включение Discord RPC", "EnableDiscordRPC", parent=card)
             dpg.add_checkbox(
@@ -599,7 +601,7 @@ class NERON_GUI:
                 parent=card,
             )
             self._config_checkbox("Включить изменение угла обзора", "EnableFovChanger", parent=card)
-            self._config_slider_int("Угол обзора", "FovChangeSize", 90, 50, 170, parent=card)
+            self._config_slider_int("Угол обзора (90-170)", "FovChangeSize", 90, 90, 170, parent=card)
 
 
 def run_gui(Options, Runtime):

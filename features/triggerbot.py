@@ -151,9 +151,9 @@ def TriggerbotThreadFunction(Options, Offsets):
         (0.0, 2.1),
         (120.0, 1.5),
         (250.0, 1.2),
-        (450.0, 0.8),
-        (700.0, 0.48),
-        (1000.0, 0.33),
+        (450.0, 0.7),
+        (700.0, 0.45),
+        (1000.0, 0.3),
         (1500.0, 0.18),
     ]
 
@@ -177,6 +177,7 @@ def TriggerbotThreadFunction(Options, Offsets):
 
     last_exception_time = 0.0
     last_gc_time = 0.0
+    last_shot_time = 0.0
 
     while True:
         try:
@@ -235,6 +236,7 @@ def TriggerbotThreadFunction(Options, Offsets):
             team_check = to_bool(Options.get("EnableTriggerbotTeamCheck", False), False)
             require_ground = to_bool(Options.get("TriggerbotRequireGround", True), True)
             speed_threshold = to_float(Options.get("TriggerbotSpeedThreshold", 5.0), 5.0)
+            shot_delay = to_float(Options.get("TriggerbotShotDelay", 0.4), 0.4)
 
             target = None
             target_hp = 0
@@ -387,9 +389,14 @@ def TriggerbotThreadFunction(Options, Offsets):
                     time.sleep(LOOP_SLEEP)
                     continue
 
+            if shot_delay > 0.0 and (now - last_shot_time) < shot_delay:
+                time.sleep(0.01)
+                continue
+
             if not win32api.GetAsyncKeyState(0x01):
                 # Реакция (адаптивная по дистанции + рандом) живёт в gameinput
                 gameinput.LeftClick(target_dist)
+                last_shot_time = time.time()
 
             time.sleep(LOOP_SLEEP)
 

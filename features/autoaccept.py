@@ -8,7 +8,7 @@ from functions import logutil
 from functions.process_watcher import ProcessConnector
 
 _SINGLE_MUTEX = None
-
+DEBUG_MODE = True  # Включи True для подробного логирования
 
 def _ensure_single_instance():
     """Только один экземпляр автопринятия на всю систему."""
@@ -21,26 +21,31 @@ def _ensure_single_instance():
     except Exception:
         return True
 
-
 def _is_button_green(rgb):
-    """Яркая заливка кнопки ПРИНЯТЬ."""
+    """Проверка на зеленый цвет кнопки ПРИНЯТЬ."""
     r = rgb & 0xFF
     g = (rgb >> 8) & 0xFF
     b = (rgb >> 16) & 0xFF
-    return g > 130 and (g - r) > 20 and (g - b) > 20
-
+    
+    # Возвращаемся к простой логике, но с пониженными порогами
+    # Это должно работать и на 60%, и на 33% яркости
+    if g > 80:  # Было 130
+        if (g - r) > 10 and (g - b) > 10:  # Было 20
+            return True
+    
+    return False
 
 def _button_present(get_pixel_rel, w, h):
     """
-    Кнопка ПРИНЯТЬ - сплошной зелёный блок высотой ~0.07h.
-    После принятия (0..10 зелёных слотов, текст "Готово") длинных
-    вертикальных зелёных отрезков нет - только короткие штрихи от
-    иконок/рамок. Ищем длинный вертикальный зелёный отрезок в двух
-    колонках внутри кнопки (левее и правее тёмного текста "ПРИНЯТЬ").
+    Поиск кнопки ПРИНЯТЬ по вертикальному зеленому блоку.
     """
     need = int(h * 0.05)
     y0, y1 = int(h * 0.36), int(h * 0.47)
     step = max(1, h // 720)
+    
+    green_pixels_found = 0
+    sample_pixels = []
+    
     for fx in (0.46, 0.54):
         x = int(w * fx)
         run = 0
@@ -50,15 +55,33 @@ def _button_present(get_pixel_rel, w, h):
                 px = get_pixel_rel(x, y)
             except Exception:
                 px = 0
+            
+            # Собираем статистику для отладки
+            if DEBUG_MODE and y == y0:
+                r = px & 0xFF
+                g = (px >> 8) & 0xFF
+                b = (px >> 16) & 0xFF
+                sample_pixels.append((x, y, r, g, b))
+            
             if _is_button_green(px):
                 run += step
+                green_pixels_found += 1
                 if run >= need:
+                    if DEBUG_MODE:
+                        logutil.debug(f"[autoaccept] Кнопка найдена! Зеленых пикселей: {green_pixels_found}, нужно: {need}")
                     return True
             else:
                 run = 0
             y += step
+    
+    if DEBUG_MODE:
+        logutil.debug(f"[autoaccept] Кнопка НЕ найдена. Зеленых пикселей: {green_pixels_found}, нужно: {need}")
+        if sample_pixels:
+            logutil.debug(f"[autoaccept] Примеры пикселей (x, y, R, G, B):")
+            for px_data in sample_pixels[:5]:  # Первые 5 пикселей
+                logutil.debug(f"  ({px_data[0]}, {px_data[1]}) -> R={px_data[2]}, G={px_data[3]}, B={px_data[4]}")
+    
     return False
-
 
 def _capture_valid(get_pixel_rel, w, h):
     non_black = 0
@@ -71,7 +94,6 @@ def _capture_valid(get_pixel_rel, w, h):
             if (px & 0xFF) + ((px >> 8) & 0xFF) + ((px >> 16) & 0xFF) > 30:
                 non_black += 1
     return non_black >= 3
-
 
 def _capture_window(hwnd):
     try:
@@ -114,9 +136,10 @@ def _capture_window(hwnd):
                     pass
 
         return get_pixel_rel, w, h, cleanup
-    except Exception:
+    except Exception as e:
+        if DEBUG_MODE:
+            logutil.debug(f"[autoaccept] _capture_window failed: {e}")
         return None
-
 
 def _capture_screen(hwnd):
     try:
@@ -137,21 +160,25 @@ def _capture_screen(hwnd):
                 pass
 
         return get_pixel_rel, w, h, cleanup
-    except Exception:
+    except Exception as e:
+        if DEBUG_MODE:
+            logutil.debug(f"[autoaccept] _capture_screen failed: {e}")
         return None
-
 
 def _grab(hwnd):
     if win32gui.GetForegroundWindow() == hwnd:
+        if DEBUG_MODE:
+            logutil.debug("[autoaccept] Окно в фокусе, используем _capture_screen")
         return _capture_screen(hwnd) or _capture_window(hwnd)
     cap = _capture_window(hwnd)
     if cap and not _capture_valid(cap[0], cap[1], cap[2]):
+        if DEBUG_MODE:
+            logutil.debug("[autoaccept] _capture_window вернул невалидные данные, пробуем _capture_screen")
         cap[3]()
         cap = None
     if not cap:
         cap = _capture_screen(hwnd)
     return cap
-
 
 def _force_foreground(hwnd):
     try:
@@ -167,10 +194,10 @@ def _force_foreground(hwnd):
             if win32gui.GetForegroundWindow() == hwnd:
                 return True
             time.sleep(0.05)
-    except Exception:
-        pass
+    except Exception as e:
+        if DEBUG_MODE:
+            logutil.debug(f"[autoaccept] _force_foreground failed: {e}")
     return win32gui.GetForegroundWindow() == hwnd
-
 
 def _is_in_match(process, client, off):
     try:
@@ -182,17 +209,15 @@ def _is_in_match(process, client, off):
     except Exception:
         return False
 
-
 def AutoAcceptThreadFunction(Options, Offsets):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
-
     if not _ensure_single_instance():
-        # Второй экземпляр: молча спим навсегда
+        if DEBUG_MODE:
+            logutil.debug("[autoaccept] Уже запущен другой экземпляр, спим")
         while True:
             time.sleep(5)
 
     cooldown_until = 0.0
-
     while True:
         try:
             if not bool(Options.get("EnableAutoAccept", False)):
@@ -212,6 +237,8 @@ def AutoAcceptThreadFunction(Options, Offsets):
 
             # Спячка на время матча
             if _is_in_match(process, client, Offsets.offset):
+                if DEBUG_MODE:
+                    logutil.debug("[autoaccept] В матче, спим")
                 time.sleep(0.3)
                 if _is_in_match(process, client, Offsets.offset):
                     time.sleep(0.5)
@@ -221,20 +248,32 @@ def AutoAcceptThreadFunction(Options, Offsets):
                 time.sleep(0.3)
                 continue
 
+            if DEBUG_MODE:
+                logutil.debug("[autoaccept] Делаем снимок экрана...")
+            
             cap = _grab(hwnd)
             if not cap:
+                if DEBUG_MODE:
+                    logutil.debug("[autoaccept] Не удалось сделать снимок")
                 time.sleep(0.3)
                 continue
+
             gp, w, h, cl = cap
+            if DEBUG_MODE:
+                logutil.debug(f"[autoaccept] Снимок получен: {w}x{h}")
+            
             try:
                 found = _button_present(gp, w, h)
             finally:
                 cl()
+
             if not found:
                 time.sleep(0.25)
                 continue
 
             # Дебаунс: подтверждаем кнопку повторным снимком
+            if DEBUG_MODE:
+                logutil.debug("[autoaccept] Кнопка найдена, делаем повторную проверку...")
             time.sleep(0.3)
             cap = _grab(hwnd)
             if not cap:
@@ -244,19 +283,31 @@ def AutoAcceptThreadFunction(Options, Offsets):
                 confirmed = _button_present(gp, w, h)
             finally:
                 cl()
+
             if not confirmed:
+                if DEBUG_MODE:
+                    logutil.debug("[autoaccept] Кнопка не подтверждена")
                 continue
 
             if not _force_foreground(hwnd):
+                if DEBUG_MODE:
+                    logutil.debug("[autoaccept] Не удалось перевести окно в фокус")
                 time.sleep(0.3)
                 continue
 
+            if DEBUG_MODE:
+                logutil.debug("[autoaccept] Окно в фокусе, кликаем...")
+            
             for attempt in range(5):
                 left, top, _, _ = win32gui.GetWindowRect(hwnd)
                 win32api.SetCursorPos((left + int(w * 0.50), top + int(h * 0.42)))
                 time.sleep(0.05)
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                
+                if DEBUG_MODE:
+                    logutil.debug(f"[autoaccept] Клик выполнен (попытка {attempt + 1})")
+                
                 time.sleep(1.0)
 
                 # Кнопка исчезла / стали слотами => приняли
@@ -268,6 +319,8 @@ def AutoAcceptThreadFunction(Options, Offsets):
                     finally:
                         cl2()
                     if not still:
+                        if DEBUG_MODE:
+                            logutil.debug("[autoaccept] Кнопка исчезла - принято!")
                         cooldown_until = time.time() + 10
                         break
                 else:
@@ -276,6 +329,8 @@ def AutoAcceptThreadFunction(Options, Offsets):
 
                 # Матч реально грузится
                 if _is_in_match(process, client, Offsets.offset):
+                    if DEBUG_MODE:
+                        logutil.debug("[autoaccept] Матч загружается - принято!")
                     cooldown_until = time.time() + 10
                     break
 

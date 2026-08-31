@@ -128,7 +128,7 @@ def draw_bomb_status_card(pme_module, *, planted, time_left, total_time=40.0):
         status_size = 18
         detail_size = 14
         x = 28
-        y = (screen_h - card_h) // 2
+        y = (screen_h - card_h) // 2.7
 
         base_accent = pme.get_color("#588bc4")
         status_accent = pme.get_color("#f87171") if planted else pme.get_color("#34d399")

@@ -13,9 +13,8 @@ def set_spec_log_level(level: int):
         _SPEC_LOG_LEVEL = max(0, min(2, int(level)))
     except Exception:
         _SPEC_LOG_LEVEL = 0
-
-if logutil.is_debug_enabled():
-    _SPEC_LOG_LEVEL = 2
+    if logutil.is_debug_enabled():
+        _SPEC_LOG_LEVEL = 2
 
 def _log(level: int, msg: str):
     if _SPEC_LOG_LEVEL >= level:
@@ -56,7 +55,6 @@ MODE_NAMES = {
 
 SCAN_INTERVAL_SEC = 0.50
 MAX_ENTITIES      = 128
-
 MASK64   = 0xFFFFFFFFFFFFFFFF
 USER_LOW  = 0x0000000000100000
 USER_HIGH = 0x00007FFFFFFFFFFF
@@ -177,23 +175,23 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
         set_spec_log_level(int(Options.get("SpectatorLogLevel", 0)))
     except Exception:
         set_spec_log_level(0)
-
+        
     off = Offsets.offset
     _log(1, "[spectator] thread started.")
-
+    
     try:
         allow_fixed = bool(Options.get("SpectatorAllowFixed", True))
     except Exception:
         allow_fixed = True
+        
     ALLOWED_MODES = {OBS_MODE_IN_EYE, OBS_MODE_CHASE, OBS_MODE_FREEZECAM} | ({OBS_MODE_FIXED} if allow_fixed else set())
-
     last_sig = None
-
+    
     while True:
         try:
             hproc = connector.ensure_process()
             client = connector.ensure_module("client.dll")
-
+            
             try:
                 if not bool(Options.get("EnableShowSpectators", False)):
                     Runtime.spectators = []
@@ -201,13 +199,13 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                     continue
             except Exception:
                 pass
-
+                
             entlist_ptr = rd_ptr(hproc, client + off.dwEntityList)
             if not entlist_ptr:
                 Runtime.spectators = []
                 time.sleep(SCAN_INTERVAL_SEC)
                 continue
-
+                
             game_rules = rd_ptr(hproc, client + getattr(off, "dwGameRules", 0))
             if game_rules:
                 mw = rd_bool(hproc, game_rules + getattr(off, "m_bMatchWaitingForResume", 0)) if getattr(off, "m_bMatchWaitingForResume", 0) else False
@@ -216,76 +214,77 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                     Runtime.spectators = []
                     time.sleep(SCAN_INTERVAL_SEC)
                     continue
-
+                    
             local_pawn, route = resolve_local_pawn(hproc, client, off, entlist_ptr)
             local_ctrl_ptr = rd_ptr(hproc, client + off.dwLocalPlayerController)
             local_hpawn_handle = rd_int(hproc, local_ctrl_ptr + off.m_hPlayerPawn) if local_ctrl_ptr else 0
             local_handle_idx = (local_hpawn_handle & 0x7FFF) if local_hpawn_handle not in (0, 0xFFFFFFFF) else 0
-
+            
             local_ctrl_idx = 0
             if local_ctrl_ptr:
                 for i2 in range(1, MAX_ENTITIES):
                     if ent_by_index_112(hproc, entlist_ptr, i2) == local_ctrl_ptr:
                         local_ctrl_idx = i2
                         break
-
+                        
             if not is_valid_ptr(local_pawn):
                 Runtime.spectators = []
                 time.sleep(SCAN_INTERVAL_SEC)
                 continue
-
+                
             spectators = []
-
             for i in range(1, MAX_ENTITIES):
                 ctrl = ent_by_index_112(hproc, entlist_ptr, i)
                 if not ctrl:
                     continue
                 if ctrl == local_ctrl_ptr:
                     continue
-
+                    
                 name     = read_controller_name(hproc, ctrl, off)
                 hObsPawn = rd_int(hproc, ctrl + off.m_hObserverPawn)
                 hPawn    = rd_int(hproc, ctrl + off.m_hPlayerPawn)
-
                 has_obs  = hObsPawn not in (0, 0xFFFFFFFF)
                 has_pawn = hPawn not in (0, 0xFFFFFFFF)
+                
                 if not has_obs and not has_pawn:
                     continue
-
+                    
                 player_pawn = 0
                 if has_pawn:
                     player_pawn, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hPawn)
-
+                    
                 # Живой игрок никогда не наблюдатель (чинит "висящих" после респауна)
                 if player_pawn and not is_dead(hproc, player_pawn, off):
                     continue
-
+                    
                 observer_pawn = 0
                 if has_obs:
                     observer_pawn, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hObsPawn)
-
+                    
                 if not observer_pawn:
                     if not player_pawn or not is_dead(hproc, player_pawn, off):
                         continue
                     observer_pawn = player_pawn
-
+                    
                 obs_services = rd_ptr(hproc, observer_pawn + off.m_pObserverServices)
                 if not obs_services and player_pawn and player_pawn != observer_pawn:
                     obs_services = rd_ptr(hproc, player_pawn + off.m_pObserverServices)
-
+                    
                 mode = rd_int(hproc, obs_services + off.m_iObserverMode) if obs_services else 0
-
+                
                 hTarget = 0
                 target_ent = 0
                 target_idx = 0
+                
                 if obs_services:
                     hTarget = rd_int(hproc, obs_services + off.m_hObserverTarget)
                     if hTarget not in (0, 0xFFFFFFFF):
                         target_ent, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hTarget)
                         target_idx = hTarget & 0x7FFF
-
+                        
                 view_entity = 0
                 view_idx = 0
+                
                 if not target_ent and observer_pawn:
                     cam = rd_ptr(hproc, observer_pawn + off.m_pCameraServices)
                     if cam:
@@ -293,14 +292,14 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                         if hView not in (0, 0xFFFFFFFF):
                             view_entity, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hView)
                             view_idx = hView & 0x7FFF
-
+                            
                 match = bool(
                     (target_ent and (target_ent == local_pawn or target_ent == local_ctrl_ptr)) or
                     (view_entity and (view_entity == local_pawn or view_entity == local_ctrl_ptr)) or
                     (target_idx and (target_idx == local_handle_idx or target_idx == local_ctrl_idx)) or
                     (view_idx and (view_idx == local_handle_idx or view_idx == local_ctrl_idx))
                 )
-
+                
                 if match and (mode in ALLOWED_MODES):
                     spectators.append({
                         "pawn": observer_pawn,
@@ -308,10 +307,10 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                         "mode_name": MODE_NAMES.get(mode, f"MODE_{mode}"),
                         "name": name or "UNKNOWN",
                     })
-
+                    
             Runtime.spectators = spectators
-
             sig = tuple(sorted((s["name"], s["pawn"], s["mode"]) for s in spectators))
+            
             if sig != last_sig:
                 if _SPEC_LOG_LEVEL >= 1:
                     if spectators:
@@ -320,9 +319,9 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                     else:
                         _log(1, "[spectator] no spectators")
                 last_sig = sig
-
+                
             time.sleep(SCAN_INTERVAL_SEC)
-
+            
         except Exception as e:
             try:
                 Runtime.spectators = []
@@ -345,7 +344,7 @@ def render_spectator_block(
     try:
         if not enabled or not spectators:
             return
-
+            
         sw = sh = 0
         if isinstance(screen_size, (tuple, list)) and len(screen_size) >= 2:
             sw, sh = int(screen_size[0]), int(screen_size[1])
@@ -354,48 +353,54 @@ def render_spectator_block(
                 sw, sh = pme.get_screen_size()
             except Exception:
                 sw, sh = 1920, 1080
-
+                
         names = []
         for s in spectators:
             names.append((s.get("name") or "UNKNOWN").strip())
+            
         if not names:
             return
-
-        shown = names[:4]
-        extra = len(names) - len(shown)
-        line = ", ".join(shown)
-        if extra > 0:
-            line += " +{}".format(extra)
+            
         title = "Spectators ({}):".format(len(names))
-
         cols = _panel_colors(pme)
-
+        
         pad_x = 14
         pad_y = 10
         title_size = 16
         name_size = 15
-        # Ширина без measure_text - оценка по длине строки
-        max_chars = max(len(title), len(line))
+        line_height = name_size + 6
+        
+        max_chars = max([len(title)] + [len(n) for n in names])
         block_w = max(220, pad_x * 2 + max_chars * 8)
-        block_h = pad_y * 2 + title_size + 6 + name_size
+        block_h = pad_y * 2 + title_size + 6 + (len(names) * line_height)
+        
         x = sw - block_w - 24
         y = sh // 2 - block_h // 2
-
+        
         pme.draw_rectangle(x, y, block_w, block_h, cols["bg"])
         pme.draw_rectangle_lines(x, y, block_w, block_h, cols["border"], lineThick=1)
         pme.draw_rectangle(x, y, 3, block_h, cols["accent"])
-
+        
         try:
-            # Единый путь: ASCII - raylib, кириллица - текстура (PIL), фолбэк - транслит
             from features.esp.fonts import draw_text as _fd
             _fd(title, x + pad_x, y + pad_y, size=title_size, color=cols["title"])
-            _fd(line, x + pad_x, y + pad_y + title_size + 6, size=name_size, color=cols["name"])
+            
+            current_y = y + pad_y + title_size + 6
+            for name in names:
+                _fd(name, x + pad_x, current_y, size=name_size, color=cols["name"])
+                current_y += line_height
+                
         except Exception:
             if font_id is not None and hasattr(pme, "draw_font"):
                 pme.draw_font(fontId=font_id, text=title, posX=x + pad_x, posY=y + pad_y,
                               fontSize=title_size, spacing=0, tint=cols["title"])
-                pme.draw_font(fontId=font_id, text=line, posX=x + pad_x, posY=y + pad_y + title_size + 6,
-                              fontSize=name_size, spacing=0, tint=cols["name"])
+                              
+                current_y = y + pad_y + title_size + 6
+                for name in names:
+                    pme.draw_font(fontId=font_id, text=name, posX=x + pad_x, posY=current_y,
+                                  fontSize=name_size, spacing=0, tint=cols["name"])
+                    current_y += line_height
+                                  
     except Exception as e:
         try:
             _log(1, f"[overlay/spec] draw error: {e}")

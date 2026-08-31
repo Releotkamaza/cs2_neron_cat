@@ -61,8 +61,12 @@ CHEAT_SETTINGS = {
     "EnableDiscordRPC": True,
 
     "EnableShowSpectators": True,
+    "EnableNoSmoke": False,
 
     "EnableOverlayRaylibFont": True,
+    
+    "EnableNoScopeOverlay": False,
+    "NoScopeActive": False,
 
     "ESP_HealthSyncSkeleton": True,
     "ESP_HealthSyncBar": True,
