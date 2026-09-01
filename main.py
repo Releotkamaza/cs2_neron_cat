@@ -79,7 +79,7 @@ if __name__ == "__main__":
           " #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#   #+#+#           #+#    #+# #+#     #+# #+#          \n"
           "###    #### ########## ###    ###  ########  ###    #### ########## ########  ###     ### ###           \n"
           "\n"
-          "             - NERON v0.9.1\n"
+          "             - NERON v0.9.8\n"
           "             - https://github.com/Releotkamaza/cs2_neron_cat")  
     
     win32process.SetPriorityClass(
