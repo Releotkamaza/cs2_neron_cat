@@ -3,7 +3,6 @@ import pymem
 from pymem.process import module_from_name
 from ext.datatypes import *
 
-
 def GetProcess(procname):
     proc = pymem.Pymem(procname)
     return proc
@@ -17,7 +16,6 @@ def GetModuleBase(modulename: str, process_object: pymem.Pymem):
     return None
 
 class ProcMemHandler:
-
     @staticmethod
     def ReadPointer(proc, address):
         return proc.read_longlong(address)
@@ -77,7 +75,16 @@ class ProcMemHandler:
 
     @staticmethod
     def ReadString(proc, address, length):
-        return proc.read_string(address, length)
+        try:
+            raw = ProcMemHandler.ReadBytes(proc, address, length)
+            # Ищем конец строки (нулевой байт)
+            null_idx = raw.find(b'\x00')
+            if null_idx != -1:
+                raw = raw[:null_idx]
+            # Декодируем с игнорированием ошибок, чтобы кракозябры не крашили софт
+            return raw.decode('utf-8', errors='ignore')
+        except Exception:
+            return "?"
 
     @staticmethod
     def ReadChar(proc, address):
@@ -89,28 +96,23 @@ class ProcMemHandler:
         bytes_ = ProcMemHandler.ReadBytes(proc, address, 4 * 16)
         matrix = struct.unpack('16f', bytes_)
         matrix = Matrix([
-        [matrix[0], matrix[1], matrix[2], matrix[3]],
-        [matrix[4], matrix[5], matrix[6], matrix[7]],
-        [matrix[8], matrix[9], matrix[10], matrix[11]],
-        [matrix[12], matrix[13], matrix[14], matrix[15]]])
+            [matrix[0], matrix[1], matrix[2], matrix[3]],
+            [matrix[4], matrix[5], matrix[6], matrix[7]],
+            [matrix[8], matrix[9], matrix[10], matrix[11]],
+            [matrix[12], matrix[13], matrix[14], matrix[15]]])
         return matrix
 
     @staticmethod
     def ReadMatrix3x4(proc, address):
-        """Read a 3x4 transform matrix (row-major) commonly used for nodeToWorld.
-        Returns a flat tuple of 12 floats.
-        """
+        """Read a 3x4 transform matrix (row-major) commonly used for nodeToWorld."""
         bytes_ = ProcMemHandler.ReadBytes(proc, address, 4 * 12)
         return struct.unpack('12f', bytes_)
 
     @staticmethod
     def ReadNodeToWorldPosition(proc, address):
-        """Return translation component of a 3x4 nodeToWorld matrix as Vector3.
-        Falls back to zeros on failure.
-        """
+        """Return translation component of a 3x4 nodeToWorld matrix as Vector3."""
         try:
             m = ProcMemHandler.ReadMatrix3x4(proc, address)
-            # translation is the 4th column (indices 3,7,11) in row-major 3x4
             return Vector3(m[3], m[7], m[11])
         except Exception:
             return Vector3(0.0, 0.0, 0.0)

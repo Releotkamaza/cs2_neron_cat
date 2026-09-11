@@ -57,6 +57,15 @@ CHEAT_SETTINGS = {
     "FOV_color": "#FFFFFF",
 
     "EnableBhop": False,
+    "EnableBhopAutoStrafe": False,
+    "BhopStrafeMaxAngle": 4.0,
+    "BhopStrafeMinAngle": 1.0,
+    "BhopBezierIntensity": 0.5,
+    "BhopStrafeSpeed": 1.0,
+    "BhopMinAngleThreshold": 1.5,
+    "BhopMinAngleCorrection": 3.0,
+    "BhopRandomDelayMin": 2,
+    "BhopRandomDelayMax": 8,
 
     "EnableDiscordRPC": True,
 

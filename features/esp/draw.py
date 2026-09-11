@@ -2,12 +2,41 @@ import pyMeow as pme
 from .colors import resolve_color
 from .fonts import draw_text as _draw_text
 
+# Режим обводки текста:
+#   "shadow4" - ПО-СТАРОМУ: 4 тени + текст (5 вызовов draw_text, максимальная обводка)
+#   "shadow1" - одна тень +1,+1 (2 вызова; на 12-15px выглядит как обводка)
+#   "plate"   - тёмная полупрозрачная подложка (2 вызова; другой вид, но максимальная читаемость)
+TEXT_OUTLINE_MODE = "plate"
+
+_SHADOW_COLOR = None
+_PLATE_COLOR = None
+
 
 def draw_shadowed_label(text, x, y, size=12, color="#FFFFFF"):
+    global _SHADOW_COLOR, _PLATE_COLOR
     base = resolve_color(color)
-    shadow = pme.fade_color(resolve_color("#000000"), 0.65)
-    for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        _draw_text(text, x + ox, y + oy, size=size, color=shadow)
+
+    if TEXT_OUTLINE_MODE == "shadow4":
+        if _SHADOW_COLOR is None:
+            _SHADOW_COLOR = pme.fade_color(resolve_color("#000000"), 0.65)
+        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            _draw_text(text, x + ox, y + oy, size=size, color=_SHADOW_COLOR)
+        _draw_text(text, x, y, size=size, color=base)
+        return
+
+    if TEXT_OUTLINE_MODE == "plate":
+        if _PLATE_COLOR is None:
+            _PLATE_COLOR = pme.fade_color(resolve_color("#000000"), 0.55)
+        w = int(len(text) * size * 0.62) + 4
+        h = size + 4
+        pme.draw_rectangle(int(x) - 2, int(y) - 2, w, h, color=_PLATE_COLOR)
+        _draw_text(text, x, y, size=size, color=base)
+        return
+
+    # shadow1 (по умолчанию)
+    if _SHADOW_COLOR is None:
+        _SHADOW_COLOR = pme.fade_color(resolve_color("#000000"), 0.8)
+    _draw_text(text, x + 1, y + 1, size=size, color=_SHADOW_COLOR)
     _draw_text(text, x, y, size=size, color=base)
 
 
@@ -48,20 +77,18 @@ def draw_health_bar(pme_module, health, x, y, height, bar_width=None, thickness_
         col_fill = pme.get_color(color_from_hex)
     else:
         col_fill = team_color if isinstance(team_color, tuple) else pme.get_color("#22C55E")
-    # Рамка и фон обычными прямоугольниками (без lines-API)
     pme.draw_rectangle(track_x - 1, track_y - 1, track_w + 2, track_h + 2, color=col_border)
     pme.draw_rectangle(track_x, track_y, track_w, track_h, color=col_bg)
     filled = int(round(track_h * hp / 100.0))
     if filled > 0:
         pme.draw_rectangle(track_x, track_y + (track_h - filled), track_w, filled, color=col_fill)
-    # Точное число ХП над баром
     _draw_text(str(hp), track_x - 6, track_y - 16, size=12, color=col_fill)
+
 
 def draw_box(pme_module, rect_left, rect_top, rect_width, rect_height, color, thickness_scale=1.0):
     base = resolve_color(color)
     x1, y1 = int(rect_left), int(rect_top)
     x2, y2 = int(rect_left + rect_width), int(rect_top + rect_height)
-
     size = max(1.0, float(min(rect_width, rect_height)))
     L = int(max(4.0, min(24.0, size * 0.22)))
     T = max(1.3, min(2.6, size * 0.018))
@@ -72,7 +99,6 @@ def draw_box(pme_module, rect_left, rect_top, rect_width, rect_height, color, th
     T = max(0.8, min(3.2, T))
     fade = max(0.65, min(1.0, size / 120.0))
     col = pme.fade_color(base, 0.9 * fade + 0.1)
-
     pme.draw_line(x1, y1, x1 + L, y1, color=col, thick=T)
     pme.draw_line(x1, y1, x1, y1 + L, color=col, thick=T)
     pme.draw_line(x2, y1, x2 - L, y1, color=col, thick=T)
@@ -86,7 +112,6 @@ def draw_box(pme_module, rect_left, rect_top, rect_width, rect_height, color, th
 def draw_skeleton(pme_module, bones, bone_connections, color, thickness=None, joint_radius=None):
     from .colors import clamp
     col = resolve_color(color)
-
     if thickness is None or joint_radius is None:
         try:
             xs = [pt.x for pt in bones.values() if pt.x >= 0 and pt.y >= 0]
@@ -98,16 +123,13 @@ def draw_skeleton(pme_module, bones, bone_connections, color, thickness=None, jo
             thickness = clamp(scale * 0.02, 1.0, 2.2)
         if joint_radius is None:
             joint_radius = int(round(clamp(scale * 0.03, 1.0, 3.0)))
-
     for s_name, e_name in bone_connections:
         if s_name in bones and e_name in bones:
             s = bones[s_name]
             e = bones[e_name]
-            # не рисуем линии к точкам за камерой (-1,-1)
             if s.x < 0 or s.y < 0 or e.x < 0 or e.y < 0:
                 continue
             pme.draw_line(s.x, s.y, e.x, e.y, color=col, thick=thickness)
-
     try:
         for _, pt in bones.items():
             if pt.x >= 0 and pt.y >= 0:
@@ -129,7 +151,6 @@ def draw_bomb_status_card(pme_module, *, planted, time_left, total_time=40.0):
         detail_size = 14
         x = 28
         y = (screen_h - card_h) // 2.7
-
         base_accent = pme.get_color("#588bc4")
         status_accent = pme.get_color("#f87171") if planted else pme.get_color("#34d399")
         col_shadow = pme.fade_color(pme.get_color("#000000"), 0.28)
@@ -138,21 +159,17 @@ def draw_bomb_status_card(pme_module, *, planted, time_left, total_time=40.0):
         col_title = pme.get_color("#f0f4ff")
         col_muted = pme.fade_color(pme.get_color("#a3b5d3"), 0.9)
         col_bar_bg = pme.fade_color(pme.get_color("#111a2b"), 0.95)
-
         pme.draw_rectangle(x + 3, y + 5, card_w, card_h, col_shadow)
         pme.draw_rectangle(x, y, card_w, card_h, col_border)
-
         inner_x = x + 1
         inner_y = y + 1
         inner_w = card_w - 2
         inner_h = card_h - 2
         pme.draw_rectangle(inner_x, inner_y, inner_w, inner_h, col_bg)
         pme.draw_rectangle(inner_x, inner_y, 3, inner_h, base_accent)
-
         title_y = inner_y + pad_y
         status_y = title_y + title_size + 6
         detail_y = status_y + status_size + 6
-
         status_text = "PLANTED" if planted else "SAFE"
         if planted:
             if time_left < 0:
@@ -167,11 +184,9 @@ def draw_bomb_status_card(pme_module, *, planted, time_left, total_time=40.0):
             detail_text = "No active bomb detected."
             show_progress = False
             remaining = 0.0
-
         _draw_text("BOMB STATUS", inner_x + pad_x, title_y, size=title_size, color=col_title)
         _draw_text(status_text, inner_x + pad_x, status_y, size=status_size, color=status_accent)
         _draw_text(detail_text, inner_x + pad_x, detail_y, size=detail_size, color=col_muted)
-
         if planted and show_progress:
             total = max(0.01, float(total_time or 40.0))
             ratio = max(0.0, min(1.0, remaining / total))

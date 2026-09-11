@@ -7,10 +7,32 @@ _OVERLAY_FONT_PATH = None
 _OVERLAY_FONT_PROBED = False
 _OVERLAY_FONT_CACHE = {}
 _OVERLAY_FONT_WARNED = set()
+
 _RAYLIB_FONT_ID = None
 _RAYLIB_FONT_ATTEMPTED = False
 _RAYLIB_FONT_TARGET_ID = 7
 
+_TR_UPPER = {
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo',
+    'Ж': 'Zh', 'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M',
+    'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U',
+    'Ф': 'F', 'Х': 'H', 'Ц': 'Ts', 'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Sch',
+    'Ъ': '', 'Ы': 'Y', 'Ь': '', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+}
+_TR_LOWER = {k.lower(): v.lower() for k, v in _TR_UPPER.items()}
+
+def _translit(s: str) -> str:
+    out = []
+    for ch in s:
+        if ch in _TR_UPPER:
+            out.append(_TR_UPPER[ch])
+        elif ch in _TR_LOWER:
+            out.append(_TR_LOWER[ch])
+        elif ord(ch) <= 126:
+            out.append(ch)
+        else:
+            out.append('?')
+    return "".join(out)
 
 def _find_overlay_font():
     global _OVERLAY_FONT_PATH, _OVERLAY_FONT_PROBED
@@ -39,7 +61,6 @@ def _find_overlay_font():
         logutil.debug("[esp] overlay font not found; using default")
     return path
 
-
 def _ensure_raylib_font():
     global _RAYLIB_FONT_ID, _RAYLIB_FONT_ATTEMPTED
     if _RAYLIB_FONT_ATTEMPTED:
@@ -57,7 +78,6 @@ def _ensure_raylib_font():
     except Exception:
         _RAYLIB_FONT_ID = None
     return _RAYLIB_FONT_ID
-
 
 def _get_overlay_font_handle(size: int = 16):
     key = int(size)
@@ -77,7 +97,6 @@ def _get_overlay_font_handle(size: int = 16):
         _OVERLAY_FONT_WARNED.add(key)
     return handle
 
-
 def draw_text(text, x, y, *, size, color):
     try:
         col = color if isinstance(color, tuple) else pme.get_color(color)
@@ -85,9 +104,11 @@ def draw_text(text, x, y, *, size, color):
         col = color
     xi = int(round(x)); yi = int(round(y)); sz = max(10, int(round(size)))
     s = str(text)
-
-    # Кириллица: raylib-шрифт без неё -> рисуем текстурой (PIL),
-    # а если недоступно - транслит как фолбэк.
+    # Не-ASCII (кириллица): pyMeow грузит raylib-шрифт только с ASCII-набором
+    # глифов — без PIL кириллица деградирует в нижние подчёркивания
+    # (проверено экспериментом 2025). Поэтому: рисуем текстурой через PIL
+    # (он растеризует TTF целиком, со всей кириллицей), и лишь в самом
+    # последнем случае — транслит, чтобы имя не пропало совсем.
     if any(ord(ch) > 126 for ch in s):
         try:
             from functions import textrender
@@ -95,12 +116,7 @@ def draw_text(text, x, y, *, size, color):
                 return
         except Exception:
             pass
-        try:
-            from functions.translit import translit
-            s = translit(s)
-        except Exception:
-            pass
-
+        s = _translit(s)
     font_id = _ensure_raylib_font()
     if font_id is not None:
         try:

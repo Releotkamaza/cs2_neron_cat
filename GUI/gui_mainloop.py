@@ -9,26 +9,25 @@ from functions import fontpaths
 ROOT_TAG = "neron_root_window"
 
 KeyNames = [
-    "OFF ", "VK_LBUTTON ", "VK_RBUTTON ", "VK_CANCEL ", "VK_MBUTTON ", "VK_XBUTTON1 ", "VK_XBUTTON2 ", "Unknown ",
-    "VK_BACK ", "VK_TAB ", "Unknown ", "Unknown ", "VK_CLEAR ", "VK_RETURN ", "Unknown ", "Unknown ", "VK_SHIFT ", "VK_CONTROL ", "VK_MENU ",
-    "VK_PAUSE ", "VK_CAPITAL ", "VK_KANA ", "Unknown ", "VK_JUNJA ", "VK_FINAL ", "VK_KANJI ", "Unknown ", "VK_ESCAPE ", "VK_CONVERT ",
-    "VK_NONCONVERT ", "VK_ACCEPT ", "VK_MODECHANGE ", "VK_SPACE ", "VK_PRIOR ", "VK_NEXT ", "VK_END ", "VK_HOME ", "VK_LEFT ", "VK_UP ",
-    "VK_RIGHT ", "VK_DOWN ", "VK_SELECT ", "VK_PRINT ", "VK_EXECUTE ", "VK_SNAPSHOT ", "VK_INSERT ", "VK_DELETE ", "VK_HELP ",
-    "0 ", "1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "7 ", "8 ", "9 ",
-    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
-    "A ", "B ", "C ", "D ", "E ", "F ", "G ", "H ", "I ", "J ", "K ", "L ", "M ", "N ", "O ", "P ", "Q ", "R ", "S ", "T ", "U ", "V ", "W ", "X ", "Y ", "Z ",
-    "VK_LWIN ", "VK_RWIN ", "VK_APPS ", "Unknown ", "VK_SLEEP ",
-    "VK_NUMPAD0 ", "VK_NUMPAD1 ", "VK_NUMPAD2 ", "VK_NUMPAD3 ", "VK_NUMPAD4 ", "VK_NUMPAD5 ", "VK_NUMPAD6 ", "VK_NUMPAD7 ", "VK_NUMPAD8 ", "VK_NUMPAD9 ",
-    "VK_MULTIPLY ", "VK_ADD ", "VK_SEPARATOR ", "VK_SUBTRACT ", "VK_DECIMAL ", "VK_DIVIDE ",
-    "VK_F1 ", "VK_F2 ", "VK_F3 ", "VK_F4 ", "VK_F5 ", "VK_F6 ", "VK_F7 ", "VK_F8 ", "VK_F9 ", "VK_F10 ", "VK_F11 ", "VK_F12 ",
-    "VK_F13 ", "VK_F14 ", "VK_F15 ", "VK_F16 ", "VK_F17 ", "VK_F18 ", "VK_F19 ", "VK_F20 ", "VK_F21 ", "VK_F22 ", "VK_F23 ", "VK_F24 ",
-    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
-    "VK_NUMLOCK ", "VK_SCROLL ",
-    "VK_OEM_NEC_EQUAL ", "VK_OEM_FJ_MASSHOU ", "VK_OEM_FJ_TOUROKU ", "VK_OEM_FJ_LOYA ", "VK_OEM_FJ_ROYA ",
-    "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ", "Unknown ",
-    "VK_LSHIFT ", "VK_RSHIFT ", "VK_LCONTROL ", "VK_RCONTROL ", "VK_LMENU ", "VK_RMENU "
+    "OFF  ",  "VK_LBUTTON  ",  "VK_RBUTTON  ",  "VK_CANCEL  ",  "VK_MBUTTON  ",  "VK_XBUTTON1  ",  "VK_XBUTTON2  ",  "Unknown  ",
+    "VK_BACK  ",  "VK_TAB  ",  "Unknown  ",  "Unknown  ",  "VK_CLEAR  ",  "VK_RETURN  ",  "Unknown  ",  "Unknown  ",  "VK_SHIFT  ",  "VK_CONTROL  ",  "VK_MENU  ",
+    "VK_PAUSE  ",  "VK_CAPITAL  ",  "VK_KANA  ",  "Unknown  ",  "VK_JUNJA  ",  "VK_FINAL  ",  "VK_KANJI  ",  "Unknown  ",  "VK_ESCAPE  ",  "VK_CONVERT  ",
+    "VK_NONCONVERT  ",  "VK_ACCEPT  ",  "VK_MODECHANGE  ",  "VK_SPACE  ",  "VK_PRIOR  ",  "VK_NEXT  ",  "VK_END  ",  "VK_HOME  ",  "VK_LEFT  ",  "VK_UP  ",
+    "VK_RIGHT  ",  "VK_DOWN  ",  "VK_SELECT  ",  "VK_PRINT  ",  "VK_EXECUTE  ",  "VK_SNAPSHOT  ",  "VK_INSERT  ",  "VK_DELETE  ",  "VK_HELP  ",
+    "0  ",  "1  ",  "2  ",  "3  ",  "4  ",  "5  ",  "6  ",  "7  ",  "8  ",  "9  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "A  ",  "B  ",  "C  ",  "D  ",  "E  ",  "F  ",  "G  ",  "H  ",  "I  ",  "J  ",  "K  ",  "L  ",  "M  ",  "N  ",  "O  ",  "P  ",  "Q  ",  "R  ",  "S  ",  "T  ",  "U  ",  "V  ",  "W  ",  "X  ",  "Y  ",  "Z  ",
+    "VK_LWIN  ",  "VK_RWIN  ",  "VK_APPS  ",  "Unknown  ",  "VK_SLEEP  ",
+    "VK_NUMPAD0  ",  "VK_NUMPAD1  ",  "VK_NUMPAD2  ",  "VK_NUMPAD3  ",  "VK_NUMPAD4  ",  "VK_NUMPAD5  ",  "VK_NUMPAD6  ",  "VK_NUMPAD7  ",  "VK_NUMPAD8  ",  "VK_NUMPAD9  ",
+    "VK_MULTIPLY  ",  "VK_ADD  ",  "VK_SEPARATOR  ",  "VK_SUBTRACT  ",  "VK_DECIMAL  ",  "VK_DIVIDE  ",
+    "VK_F1  ",  "VK_F2  ",  "VK_F3  ",  "VK_F4  ",  "VK_F5  ",  "VK_F6  ",  "VK_F7  ",  "VK_F8  ",  "VK_F9  ",  "VK_F10  ",  "VK_F11  ",  "VK_F12  ",
+    "VK_F13  ",  "VK_F14  ",  "VK_F15  ",  "VK_F16  ",  "VK_F17  ",  "VK_F18  ",  "VK_F19  ",  "VK_F20  ",  "VK_F21  ",  "VK_F22  ",  "VK_F23  ",  "VK_F24  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "VK_NUMLOCK  ",  "VK_SCROLL  ",
+    "VK_OEM_NEC_EQUAL  ",  "VK_OEM_FJ_MASSHOU  ",  "VK_OEM_FJ_TOUROKU  ",  "VK_OEM_FJ_LOYA  ",  "VK_OEM_FJ_ROYA  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "VK_LSHIFT  ",  "VK_RSHIFT  ",  "VK_LCONTROL  ",  "VK_RCONTROL  ",  "VK_LMENU  ",  "VK_RMENU  "
 ]
-
 
 class NERON_GUI:
     def __init__(self, config, runtime):
@@ -130,6 +129,7 @@ class NERON_GUI:
         except Exception as e:
             logutil.debug(f"[gui] font registry error: {e}")
             self.ui_font = None
+
         if self.ui_font:
             try:
                 dpg.bind_font(self.ui_font)
@@ -218,6 +218,7 @@ class NERON_GUI:
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, self.palette["frame"])
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, self.palette["frame_hover"])
                 dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabActive, self.palette["frame_active"])
+                
                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 16, 16)
                 dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 12, 6)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 10, 8)
@@ -267,7 +268,7 @@ class NERON_GUI:
             pass
         dpg.start_dearpygui()
         dpg.destroy_context()
-        
+
     def _sync_external(self):
         """Подтягивает в виджеты значения, изменённые из других процессов (хоткеи)."""
         pairs = (
@@ -302,7 +303,6 @@ class NERON_GUI:
             tag=ROOT_TAG,
         ) as root:
             self.root_window = root
-
             # Градиент-подложка: drawlist высотой 1px не ломает layout,
             # полосы рисуем координатами, не доходя до краёв (pad=-12).
             with dpg.drawlist(parent=root, width=self.viewport_width, height=1):
@@ -326,17 +326,18 @@ class NERON_GUI:
                         fill=(r, g, b, 255),
                         thickness=0.0,
                     )
-
             header_group = dpg.add_group()
             dpg.add_text("Control Panel", color=self.palette["accent"], parent=header_group)
             dpg.add_spacer(height=2, parent=header_group)
             dpg.add_separator(parent=header_group)
+
             with dpg.tab_bar():
                 self._build_tab_aimbot()
                 self._build_tab_visuals()
                 self._build_tab_triggerbot()
                 self._build_tab_recoil()
                 self._build_tab_colors()
+                self._build_tab_bhop()
                 self._build_tab_misc()
 
     def _tab_card(self, title, subtitle=None):
@@ -378,9 +379,11 @@ class NERON_GUI:
             self._esp_master_cb = self._config_checkbox("Включение ESP", "EnableESP", default=True, parent=card)
             self._config_hotkey("ESP Hotkey (вкл/выкл)", "ESPMasterKey", parent=card)
             dpg.add_spacer(height=6, parent=card)
+
             with dpg.group(horizontal=True, horizontal_spacing=18, parent=card):
                 left_col = dpg.add_child_window(width=int(self.viewport_width*0.30), autosize_y=True, no_scrollbar=True, border=True)
                 right_col = dpg.add_child_window(width=int(self.viewport_width*0.60), autosize_y=True, no_scrollbar=True, border=True)
+                
                 dpg.add_text("Renderers", color=self.palette["text_muted"], parent=left_col)
                 with dpg.group(horizontal=True, horizontal_spacing=24, parent=left_col):
                     r1c1 = dpg.add_group()
@@ -390,6 +393,7 @@ class NERON_GUI:
                     self._config_checkbox("Проверка на видимость", "ESP_VisibleCheckBox", parent=r1c2)
                     self._config_checkbox("Трейсеры", "EnableESPTracerRendering", parent=r1c2)
                     self._config_checkbox("Проверка на тиммейта", "EnableESPTeamCheck", parent=r1c2)
+                    
                 dpg.add_spacer(height=6, parent=left_col)
                 dpg.add_text("Labels", color=self.palette["text_muted"], parent=left_col)
                 with dpg.group(horizontal=True, horizontal_spacing=24, parent=left_col):
@@ -399,18 +403,22 @@ class NERON_GUI:
                     self._config_checkbox("Дистанция", "EnableESPDistanceText", parent=r2c1)
                     self._config_checkbox("Вывод HP", "EnableESPHealthText", parent=r2c2)
                     self._config_checkbox("HP Bar", "EnableESPHealthBarRendering", parent=r2c2)
+                    
                 dpg.add_text("Визуал и толщина", color=self.palette["text_muted"], parent=right_col)
                 dpg.add_spacer(height=2, parent=right_col)
                 dpg.add_text("Синхронизация с HP", color=self.palette["text_subtle"], parent=right_col)
                 self._config_checkbox("Skeleton базируется на HP", "ESP_HealthSyncSkeleton", default=True, parent=right_col)
                 self._config_checkbox("HP Bar базируется на HP", "ESP_HealthSyncBar", default=True, parent=right_col)
+                
                 dpg.add_spacer(height=6, parent=right_col)
                 dpg.add_separator(parent=right_col)
                 dpg.add_spacer(height=6, parent=right_col)
                 dpg.add_text("Толщина", color=self.palette["text_subtle"], parent=right_col)
+                
                 s1 = self._config_slider_float("Размер Skeleton", "ESP_SkeletonThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
                 s2 = self._config_slider_float("Размер Box", "ESP_BoxThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
                 s3 = self._config_slider_float("Толщина HP Bar", "ESP_HealthBarThicknessScale", 1.0, 0.6, 1.6, parent=right_col)
+                
                 try:
                     dpg.configure_item(s1, width=int(self.control_width*1.4))
                     dpg.configure_item(s2, width=int(self.control_width*1.4))
@@ -443,8 +451,10 @@ class NERON_GUI:
             ct_color = self._config_get("CT_color", "#4DA2FF") or "#4DA2FF"
             t_color = self._config_get("T_color", "#FF6A5A") or "#FF6A5A"
             fov_color = self._config_get("FOV_color", "#FF3F88") or "#FF3F88"
+            
             dpg.add_text("Цвета игроков", color=self.palette["text_muted"], parent=card)
             dpg.add_spacer(height=4, parent=card)
+            
             with dpg.group(horizontal=True, horizontal_spacing=18, parent=card):
                 dpg.add_color_picker(
                     label="Counter Terrorist",
@@ -470,9 +480,11 @@ class NERON_GUI:
                     user_data=("T_color", "color"),
                     callback=self._on_widget_change,
                 )
+                
             dpg.add_spacer(height=6, parent=card)
             dpg.add_separator(parent=card)
             dpg.add_spacer(height=6, parent=card)
+            
             dpg.add_text("Misc Colors", color=self.palette["text_muted"], parent=card)
             dpg.add_color_picker(
                 label="FOV Color",
@@ -590,10 +602,8 @@ class NERON_GUI:
             self._config_checkbox("Убрать чёрный скоуп (AWP/SSG)", "EnableNoScopeOverlay", parent=card)
             self._config_checkbox("Включение таймера бомбы", "EnableESPBombTimer", parent=card)
             self._config_checkbox("Включение Антифлеша", "EnableAntiFlashbang", parent=card)
-            self._config_checkbox("Включение бхопа", "EnableBhop", parent=card)
             self._config_checkbox("Удаление смоков", "EnableNoSmoke", parent=card)
             self._config_checkbox("Включение автопринятия матча", "EnableAutoAccept", parent=card)
-            self._config_checkbox("Включение Discord RPC", "EnableDiscordRPC", parent=card)
             dpg.add_checkbox(
                 label="Список наблюдателей (в матче)",
                 default_value=self.config.get("EnableShowSpectators", False),
@@ -602,6 +612,63 @@ class NERON_GUI:
             )
             self._config_checkbox("Включить изменение угла обзора", "EnableFovChanger", parent=card)
             self._config_slider_int("Угол обзора (90-170)", "FovChangeSize", 90, 90, 170, parent=card)
+
+
+    def _build_tab_bhop(self):
+        with dpg.tab(label="Бхоп"):
+            card = self._tab_card("Баннихоп и автострейф", "Настройка бхопа и автострейфа.")
+
+            self._config_checkbox("Включить бхоп", "EnableBhop", parent=card)
+            dpg.add_spacer(height=6, parent=card)
+            dpg.add_separator(parent=card)
+            dpg.add_spacer(height=6, parent=card)
+
+            dpg.add_text("Автострейф", color=self.palette["text_muted"], parent=card)
+            dpg.add_spacer(height=4, parent=card)
+
+            self._config_checkbox("Включить автострейф", "EnableBhopAutoStrafe", parent=card)
+            dpg.add_spacer(height=8, parent=card)
+
+            self._config_slider_float(
+                "Макс. угол стрейфа (°)", "BhopStrafeMaxAngle",
+                4.0, 1.0, 12.0, parent=card, format="%.1f"
+            )
+            self._config_slider_float(
+                "Мин. угол стрейфа (°)", "BhopStrafeMinAngle",
+                1.0, 0.5, 5.0, parent=card, format="%.1f"
+            )
+            self._config_slider_float(
+                "Интенсивность кривой Безье", "BhopBezierIntensity",
+                0.5, 0.0, 1.0, parent=card, format="%.2f"
+            )
+            self._config_slider_float(
+                "Скорость автострейфа", "BhopStrafeSpeed",
+                1.0, 0.3, 3.0, parent=card, format="%.2f"
+            )
+
+            dpg.add_spacer(height=8, parent=card)
+            dpg.add_separator(parent=card)
+            dpg.add_spacer(height=6, parent=card)
+
+            dpg.add_text("Анти-детект", color=self.palette["text_muted"], parent=card)
+            dpg.add_spacer(height=4, parent=card)
+
+            self._config_slider_float(
+                "Порог мин. угла (°)", "BhopMinAngleThreshold",
+                1.5, 0.5, 4.0, parent=card, format="%.1f"
+            )
+            self._config_slider_float(
+                "Коррекция след. угла (°)", "BhopMinAngleCorrection",
+                3.0, 1.0, 8.0, parent=card, format="%.1f"
+            )
+            self._config_slider_int(
+                "Мин. задержка (мс)", "BhopRandomDelayMin",
+                2, 1, 20, parent=card
+            )
+            self._config_slider_int(
+                "Макс. задержка (мс)", "BhopRandomDelayMax",
+                8, 2, 30, parent=card
+            )
 
 
 def run_gui(Options, Runtime):

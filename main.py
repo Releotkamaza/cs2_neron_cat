@@ -1,4 +1,5 @@
 import globals
+import random
 from functions import memfuncs
 from functions import logutil
 from features import aimbot
@@ -10,7 +11,6 @@ from features import antiflash
 from features import autoaccept
 from features import triggerbot
 from features import bhop
-from features import discodrpc
 from features import spectator
 from features import nosmoke
 from GUI import gui_mainloop
@@ -26,6 +26,7 @@ from functions.process_watcher import ProcessConnector
 
 keyboard.add_hotkey("insert", callback=lambda: gui_util.hide_dpg())
 keyboard.add_hotkey("home", callback=lambda: gui_util.streamproof_toggle())
+
 
 class ManagedConfig:
     def __init__(self, managed_dict, save_function):
@@ -58,9 +59,11 @@ class ManagedConfig:
 
     def __repr__(self): return repr(self._dict)
 
+
 def SaveConfig(options):
     with open(globals.SAVE_FILE, 'w') as fp:
         json.dump(dict(options), fp, indent=4)
+
 
 def LoadConfig():
     if not os.path.exists(globals.SAVE_FILE):
@@ -71,24 +74,37 @@ def LoadConfig():
             globals.CHEAT_SETTINGS = json.load(fp)
 
 if __name__ == "__main__":
-    print("      ::::    ::: :::::::::: :::::::::   ::::::::  ::::    :::            ::::::::      ::: ::::::::::: \n"
-          "     :+:+:   :+: :+:        :+:    :+: :+:    :+: :+:+:   :+:           :+:    :+:   :+: :+:   :+:      \n"
-          "    :+:+:+  +:+ +:+        +:+    +:+ +:+    +:+ :+:+:+  +:+           +:+         +:+   +:+  +:+       \n"
-          "   +#+ +:+ +#+ +#++:++#   +#++:++#:  +#+    +:+ +#+ +:+ +#+           +#+        +#++:++#++: +#+        \n"
-          "  +#+  +#+#+# +#+        +#+    +#+ +#+    +#+ +#+  +#+#+#           +#+        +#+     +#+ +#+         \n"
-          " #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#   #+#+#           #+#    #+# #+#     #+# #+#          \n"
-          "###    #### ########## ###    ###  ########  ###    #### ########## ########  ###     ### ###           \n"
-          "\n"
-          "             - NERON v0.9.8\n"
-          "             - https://github.com/Releotkamaza/cs2_neron_cat")  
-    
+    kaomojis = [
+        "(=^･ω･^=)",
+        "(=^･^=)",
+        "≽^•⩊•^≼",
+        "(=^-ω-^=)",
+        "(=˃ᆺ˂=)",
+        "^._.^",
+        "^>⩊<^",
+        "(=^･ｪ･^=)",
+        "≽^• ˕ •^≼",
+        "ᓚ₍ ^. ̫ .^₎"
+    ]
+
+if __name__ == "__main__":
+    print("      ::::    ::: :::::::::: :::::::::   ::::::::  ::::    :::            ::::::::      ::: ::::::::::: \n  "
+          "     :+:+:   :+: :+:        :+:    :+: :+:    :+: :+:+:   :+:           :+:    :+:   :+: :+:   :+:      \n  "
+          "    :+:+:+  +:+ +:+        +:+    +:+ +:+    +:+ :+:+:+  +:+           +:+         +:+   +:+  +:+       \n  "
+          "   +#+ +:+ +#+ +#++:++#   +#++:++#:  +#+    +:+ +#+ +:+ +#+           +#+        +#++:++#++: +#+        \n  "
+          "  +#+  +#+#+# +#+        +#+    +#+ +#+    +:+ +#+  +#+#+#           +#+        +#+     +#+ +#+         \n  "
+          " #+#   #+#+# #+#        #+#    #+# #+#    #+# #+#   #+#+#           #+#    #+# #+#     #+# #+#          \n  "
+          "###    #### ########## ###    ###  ########  ###    #### ########## ########  ###     ### ###           \n  "
+          "\n  "
+          "             - NERON v0.9.1\n  "
+          "             - https://github.com/Releotkamaza/cs2_neron_cat\n  "
+          f"             - {random.choice(kaomojis)}  ")
+          
     win32process.SetPriorityClass(
         win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, True, win32api.GetCurrentProcessId()),
         win32process.HIGH_PRIORITY_CLASS
     )
-    
     multiprocessing.freeze_support()
-    
     COM_PORT = None
     use_arduino = "N"
     if use_arduino.upper() == "Y":
@@ -98,12 +114,11 @@ if __name__ == "__main__":
         ARDUINO_HANDLE = serial.Serial([p.device for p in serial.tools.list_ports.comports()][int(COM_PORT)], 9600)
     else:
         ARDUINO_HANDLE = None
-    
     # Process & module
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
     ProcessObject = connector.ensure_process()
     ClientModuleAddress = connector.ensure_module("client.dll")
-    
+
     def _clean_exit():
         # Возвращаем FOV по умолчанию, чтобы после выхода игра не оставалась "с нашим FOV"
         try:
@@ -121,63 +136,50 @@ if __name__ == "__main__":
         os._exit(0)
 
     keyboard.add_hotkey("end", callback=_clean_exit)
-    
     # Config
     LoadConfig()
-    
     Manager = multiprocessing.Manager()
     SharedOptions_M = Manager.dict(globals.CHEAT_SETTINGS)
     SharedOptions = ManagedConfig(SharedOptions_M, save_function=SaveConfig)
-    
     # Offsets
     SharedOffsets = Manager.Namespace()
     SharedOffsets.offset = globals.GAME_OFFSETS
-    
     SharedRuntime = Manager.Namespace()
     SharedRuntime.spectators = []
     SharedOptions["EnableShowSpectators"] = True
-    
     DEBUG_FAKE_SPECS = False
     if DEBUG_FAKE_SPECS and not SharedRuntime.spectators and SharedOptions.get("EnableShowSpectators", False):
         SharedRuntime.spectators = [{"name": "Tired", "mode_name": "FREEZECAM", "pawn": 0xDEAD}]
-    
     GUI_proc = multiprocessing.Process(target=gui_mainloop.run_gui, args=(SharedOptions, SharedRuntime,))
     GUI_proc.start()
-    
     # Overlay
     esp.pme.overlay_init(title="ESP-Overlay")
     fps = esp.pme.get_monitor_refresh_rate()
     try:
-        target_fps = min(max(int(fps) + 20, 90), 240)
+        target_fps = min(max(int(fps) * 2 + 30, 144), 360)
     except Exception:
-        target_fps = fps
+        target_fps = 240
     esp.pme.set_fps(target_fps)
-    
     # FOV changer
     FOV_proc = multiprocessing.Process(target=fovchanger.FovChangerThreadFunction, args=(SharedOptions, SharedOffsets,))
     FOV_proc.daemon = True
     FOV_proc.start()
-    
     # Anti-Flash (separate worker)
     AntiFlash_proc = multiprocessing.Process(target=antiflash.AntiFlashThreadFunction, args=(SharedOptions, SharedOffsets,))
     AntiFlash_proc.daemon = True
     AntiFlash_proc.start()
-    
     # Автопринятие матча (отдельный воркер)
     AutoAccept_proc = multiprocessing.Process(target=autoaccept.AutoAcceptThreadFunction, args=(SharedOptions, SharedOffsets,))
     AutoAccept_proc.daemon = True
     AutoAccept_proc.start()
-    
     # Triggerbot (separate worker)
     Trigger_proc = multiprocessing.Process(target=triggerbot.TriggerbotThreadFunction, args=(SharedOptions, SharedOffsets,))
     Trigger_proc.daemon = True
     Trigger_proc.start()
-    
     # Bhop (separate thread to keep sleeps off overlay thread)
     Bhop_proc = multiprocessing.Process(target=bhop.BhopThreadFunction, args=(SharedOptions, SharedOffsets,))
     Bhop_proc.daemon = True
     Bhop_proc.start()
-    
     # Bomb timer
     SharedBombState = Manager.Namespace()
     SharedBombState.bombPlanted = False
@@ -185,12 +187,6 @@ if __name__ == "__main__":
     Bomb_proc = multiprocessing.Process(target=bombtimer.BombTimerThread, args=(SharedBombState, SharedOffsets,))
     Bomb_proc.daemon = True
     Bomb_proc.start()
-    
-    # Discord RPC
-    discord_rpc_proc = multiprocessing.Process(target=discodrpc.DiscordRpcThread, args=(SharedOptions,))
-    discord_rpc_proc.daemon = True
-    discord_rpc_proc.start()
-    
     # No Smoke (separate worker)
     NoSmoke_proc = multiprocessing.Process(
         target=nosmoke.NoSmokeThreadFunction,
@@ -199,7 +195,6 @@ if __name__ == "__main__":
     NoSmoke_proc.daemon = True
     NoSmoke_proc.start()
     logutil.debug("[main] nosmoke worker: started")
-    
     # Spectator monitor
     Spectator_proc = multiprocessing.Process(
         target=spectator.SpectatorThreadFunction,
@@ -208,11 +203,9 @@ if __name__ == "__main__":
     Spectator_proc.daemon = True
     Spectator_proc.start()
     logutil.debug("[main] spectator monitor: started")
-    
     overlay_logged_once = False
     _gc_counter = 0
     _gc_last_time = time.time()
-    
     while esp.pme.overlay_loop():
         # Принудительная сборка мусора каждые 60 кадров ИЛИ раз в 3 секунды
         _gc_counter += 1
@@ -221,7 +214,6 @@ if __name__ == "__main__":
             gc.collect()
             _gc_counter = 0
             _gc_last_time = _gc_now
-        
         try:
             ProcessObject = connector.ensure_process()
             ClientModuleAddress = connector.ensure_module("client.dll")
@@ -229,13 +221,11 @@ if __name__ == "__main__":
             connector.invalidate()
             time.sleep(0.5)
             continue
-        
         if not overlay_logged_once:
             logutil.debug("[main] overlay loop entered; Spec List will be drawn from features/esp.py.")
             logutil.debug("[main] rendering Spec List on the game frame (inside ESP begin/end drawing)")
             overlay_logged_once = True
             esp_key_prev = False
-            
         # ESP master hotkey: нажал - включил, ещё раз - выключил (синхронно с GUI)
         try:
             esp_key_code = int(SharedOptions.get("ESPMasterKey", 0) or 0)
@@ -246,9 +236,10 @@ if __name__ == "__main__":
             if esp_key_now and not esp_key_prev:
                 SharedOptions["EnableESP"] = not bool(SharedOptions.get("EnableESP", True))
             esp_key_prev = esp_key_now
-        
+        # Делаем локальную копию настроек ОДИН раз за кадр, чтобы не дергать IPC
+        local_opts = dict(SharedOptions.items())
         try:
-            esp.ESP_Update(ProcessObject, ClientModuleAddress, SharedOptions, SharedOffsets, SharedBombState, SharedRuntime)
+            esp.ESP_Update(ProcessObject, ClientModuleAddress, local_opts, SharedOffsets, SharedBombState, SharedRuntime)
             try:
                 _ = len(SharedRuntime.spectators)
             except Exception:
@@ -256,7 +247,7 @@ if __name__ == "__main__":
             if SharedOptions["EnableAimbot"] and win32api.GetAsyncKeyState(SharedOptions["AimbotKey"]) & 0x8000:
                 aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
             rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, SharedOptions, ARDUINO_HANDLE=ARDUINO_HANDLE)
-        except Exception:
+        except Exception as _e:
+            print("[MAIN] ESP/Aimbot error:", repr(_e))
             connector.invalidate()
-            time.sleep(0.01)
             continue
