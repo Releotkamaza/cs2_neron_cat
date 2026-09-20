@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 import os
 import json
-import requests
+
+
+class OffsetError(RuntimeError):
+    """Отсутствует оффсет в дампе. Раньше здесь был print + exit(),
+    молча убивавший процесс; теперь исключение с внятной причиной."""
+
 
 @dataclass
 class Offset:
@@ -18,7 +23,7 @@ class Offset:
     ButtonRight: int
     m_pMovementServices: int
     m_flLeftMove: int
-    m_hViewEntity: int  
+    m_hViewEntity: int
     m_hObserverPawn: int
     m_hPlayerPawn: int
     m_iHealth: int
@@ -27,7 +32,6 @@ class Offset:
     m_vOldOrigin: int
     m_pGameSceneNode: int
     m_modelState: int
-    m_boneArray: int
     m_nodeToWorld: int
     m_sSanitizedPlayerName: int
     m_iIDEntIndex: int
@@ -37,8 +41,8 @@ class Offset:
     m_pCameraServices: int
     m_bIsScoped: int
     m_vecViewOffset: int
-    m_entitySpottedState: int 
-    m_bSpotted: int 
+    m_entitySpottedState: int
+    m_bSpotted: int
     m_bBombPlanted: int
     m_iShotsFired: int
     m_pAimPunchServices: int
@@ -50,43 +54,64 @@ class Offset:
     m_hObserverTarget: int
     m_bMatchWaitingForResume: int
     m_bGameRestart: int
+    m_iDesiredFOV: int
+
+    # ВАЖНО: m_boneArray удалён - был единственным хардкодом (128) и никем
+    # не читался. Костный массив во всей кодовой базе вычисляется как
+    # m_modelState + 0x80 (см. BONE_ARRAY_OFF в features/esp/core.py):
+    # это структурная константа layout движка, в дампах её нет.
+
 
 class Client:
     def __init__(self, prefer_local=True):
-        # 1. Пытаемся загрузить локальные оффсеты (Приоритет)
+        # 1. Локальный дамп output/ (батник регенерит его при каждом запуске)
         if prefer_local and self._try_load_from_file():
             return
-            
-        # 2. Если локально не вышло, пытаемся скачать с сервера
+
+        # 2. Фоллбек: свежий дамп с a2x/cs2-dumper (например, если дамп
+        #    не снялся, потому что игра была закрыта)
         if self._try_load_from_url():
             return
-        else:
-            print("[-] Критическая ошибка: не удалось загрузить оффсеты ни локально, ни с сервера.")
-            exit()
+
+        raise OffsetError(
+            "Не удалось загрузить оффсеты ни локально (output/), ни с сервера. "
+            "Запусти CS2 и прогони cs2-dumper -f json в папке чита."
+        )
 
     def _try_load_from_url(self):
+        # Ленивый импорт: requests нужен только при реальном фоллбеке
+        import requests
         try:
-            self.offsets = self._get_json_from_url('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json')
-            self.clientdll = self._get_json_from_url('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json')
-            self.buttons = self._get_json_from_url('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/buttons.json')
+            self.offsets = self._get_json_from_url(
+                'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json',
+                requests)
+            self.clientdll = self._get_json_from_url(
+                'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json',
+                requests)
+            self.buttons = self._get_json_from_url(
+                'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/buttons.json',
+                requests)
             return True
         except Exception as e:
-            print(f'[-] Ошибка при получении оффсетов по URL: {e}')
+            print(f'[-] Ошибка при получении оффсетов по URL: {e}', flush=True)
             return False
 
-    def _get_json_from_url(self, url):
-        return requests.get(url).json()
+    def _get_json_from_url(self, url, requests):
+        # Таймаут обязателен: без него сетевой подвис вешал старт навсегда
+        return requests.get(url, timeout=10).json()
 
     def _try_load_from_file(self):
         try:
-            base_path = os.path.join(os.getcwd(), 'output')
+            # Путь от файла модуля, не от cwd: запуск из другой директории
+            # ("python C:\neron_cat\main.py") больше не ломает поиск output/
+            base_path = os.path.abspath(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output'))
             self.offsets = self._load_json_from_file(base_path, 'offsets.json')
             self.clientdll = self._load_json_from_file(base_path, 'client_dll.json')
             self.buttons = self._load_json_from_file(base_path, 'buttons.json')
             return True
-        except Exception as e:
-            # Можно закомментировать строку ниже, чтобы не видеть даже фоллбэк-логи
-            # print(f'[-] Не удалось загрузить данные из локальных файлов: {e}')
+        except Exception:
+            # Фоллбек на URL молча: это штатная ситуация, когда дамп не снялся
             return False
 
     def _load_json_from_file(self, base_path, filename):
@@ -94,36 +119,35 @@ class Client:
             return json.load(f)
 
     def offset(self, a):
-        return self._get_value_from_dict(self.offsets, ['client.dll', a], f'Offset {a} not found.')
+        return self._get_value_from_dict(self.offsets, ['client.dll', a])
 
     def get(self, a, b):
         try:
             return self.clientdll["client.dll"]['classes'][a]['fields'][b]
-        except KeyError as e:
-            print(f"Error with getting offset for {a} -> {b}: {e}")
-            exit()
+        except KeyError:
+            raise OffsetError(
+                f"Поле {a}.{b} не найдено в client_dll.json - обнови output/ "
+                f"(запусти CS2, потом cs2-dumper -f json в папке чита)"
+            )
 
     def button(self, a):
-        return self._get_value_from_dict(self.buttons, ['client.dll', a], f'Button {a} not found.')
+        return self._get_value_from_dict(self.buttons, ['client.dll', a])
 
-    def get_aim_punch_services_offset(self):
-        return self.clientdll["client.dll"]["classes"]["C_CSPlayerPawn"]["fields"]["m_pAimPunchServices"]
-
-    def get_predictable_base_angle_offset(self):
-        return self.clientdll["client.dll"]["classes"]["CCSPlayer_AimPunchServices"]["fields"]["m_predictableBaseAngle"]
-
-    def _get_value_from_dict(self, data, keys, error_message):
+    def _get_value_from_dict(self, data, keys):
         try:
             for key in keys:
                 data = data[key]
             return data
         except KeyError:
-            print(error_message)
-            exit()
+            raise OffsetError(
+                f"Ключ {' -> '.join(keys)} не найден в offsets.json/buttons.json - "
+                f"обнови output/"
+            )
+
 
 def get_offsets() -> Offset:
     oc = Client(prefer_local=True)
-    offsets_obj = Offset(
+    return Offset(
         dwViewMatrix=oc.offset("dwViewMatrix"),
         dwLocalPlayerPawn=oc.offset("dwLocalPlayerPawn"),
         dwEntityList=oc.offset("dwEntityList"),
@@ -144,7 +168,6 @@ def get_offsets() -> Offset:
         m_vOldOrigin=oc.get("C_BasePlayerPawn", "m_vOldOrigin"),
         m_pGameSceneNode=oc.get("C_BaseEntity", "m_pGameSceneNode"),
         m_modelState=oc.get("CSkeletonInstance", "m_modelState"),
-        m_boneArray=128,
         m_nodeToWorld=oc.get("CGameSceneNode", "m_nodeToWorld"),
         m_sSanitizedPlayerName=oc.get("CCSPlayerController", "m_sSanitizedPlayerName"),
         m_iIDEntIndex=oc.get("C_CSPlayerPawn", "m_iIDEntIndex"),
@@ -169,5 +192,5 @@ def get_offsets() -> Offset:
         m_hObserverTarget=oc.get("CPlayer_ObserverServices", "m_hObserverTarget"),
         m_bMatchWaitingForResume=oc.get("C_CSGameRules", "m_bMatchWaitingForResume"),
         m_bGameRestart=oc.get("C_CSGameRules", "m_bGameRestart"),
+        m_iDesiredFOV=oc.get("CBasePlayerController", "m_iDesiredFOV"),
     )
-    return offsets_obj

@@ -1,13 +1,16 @@
+import gc
+import json
+import math
+import os
+import time
+
+import win32api
+import win32gui
+
 from functions import memfuncs
 from functions import gameinput
 from functions import logutil
 from functions.process_watcher import ProcessConnector
-import win32api, win32gui
-import time
-import math
-import gc
-
-prev_key_state = False
 
 
 class Vector3:
@@ -134,17 +137,132 @@ def angle_difference(angle1, angle2):
     return math.sqrt(diff_yaw * diff_yaw + diff_pitch * diff_pitch)
 
 
-def TriggerbotThreadFunction(Options, Offsets):
-    connector = ProcessConnector("cs2.exe", modules=["client.dll"])
-    global prev_key_state
+# ==================== Оффсеты из дампа (без хардкода) ====================
 
-    # При включённом Key Check стартуем "разоружёнными": состояние теперь
-    # живёт в общем конфиге (EnableTriggerbot), а не во внутренней переменной.
+_json_cache = {}
+
+
+def _find_dump_dir():
+    base = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.abspath(os.path.join(base, ".."))
+    for c in (os.path.join(repo, "output"), repo, os.path.join(repo, "ext"), base):
+        if os.path.exists(os.path.join(c, "client_dll.json")):
+            return c
+    return None
+
+
+_DUMP_DIR = _find_dump_dir()
+
+
+def _dump_json(filename):
+    if filename in _json_cache:
+        return _json_cache[filename]
+    data = {}
+    if _DUMP_DIR:
+        try:
+            with open(os.path.join(_DUMP_DIR, filename), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    _json_cache[filename] = data or {}
+    return _json_cache[filename]
+
+
+def _schema_fields_flat():
+    jd = _dump_json("client_dll.json")
+    out = {}
     try:
-        if to_bool(Options.get("EnableTriggerbotKeyCheck", True), True):
-            Options["EnableTriggerbot"] = False
+        classes = jd.get("client.dll", {}).get("classes", {})
+        for cdata in classes.values():
+            for fname, fval in (cdata.get("fields") or {}).items():
+                out.setdefault(str(fname).strip(), int(fval))
     except Exception:
         pass
+    return out
+
+
+_SCHEMA = _schema_fields_flat()
+
+
+def TriggerbotThreadFunction(Options, Offsets):
+    connector = ProcessConnector("cs2.exe", modules=["client.dll"])
+
+    off = Offsets.offset
+
+    def _need(name):
+        try:
+            v = int(getattr(off, name, 0) or 0)
+        except Exception:
+            v = 0
+        return v if v else _SCHEMA.get(name, 0)
+
+    # Ядро: без них триггер не работает вообще
+    o_local_pawn = _need("dwLocalPlayerPawn")
+    o_entity_list = _need("dwEntityList")
+    o_health = _need("m_iHealth")
+    o_id_ent_index = _need("m_iIDEntIndex")
+    o_origin = _need("m_vOldOrigin")
+
+    core_missing = [
+        n for n, v in (
+            ("dwLocalPlayerPawn", o_local_pawn),
+            ("dwEntityList", o_entity_list),
+            ("m_iHealth", o_health),
+            ("m_iIDEntIndex", o_id_ent_index),
+            ("m_vOldOrigin", o_origin),
+        ) if not v
+    ]
+    if core_missing:
+        msg = ("[triggerbot] OFF - нет оффсетов: " + ", ".join(core_missing) +
+               ". Запусти CS2, потом 'cs2-dumper -f json' в папке чита, перезапусти чит.")
+        print(msg)
+        logutil.debug(msg)
+        while True:
+            time.sleep(5)
+        return
+
+    # Автоволл: нужны доп. поля
+    o_view_angles = _need("dwViewAngles")
+    o_eye_angles = _need("m_angEyeAngles")
+    o_pawn_handle = _need("m_hPlayerPawn")
+    o_scene_node = _need("m_pGameSceneNode")
+    o_model_state = _need("m_modelState")
+    o_view_offset = _need("m_vecViewOffset")
+
+    wb_missing = []
+    if not (o_view_angles or o_eye_angles):
+        wb_missing.append("dwViewAngles/m_angEyeAngles")
+    for n, v in (
+        ("m_hPlayerPawn", o_pawn_handle),
+        ("m_pGameSceneNode", o_scene_node),
+        ("m_modelState", o_model_state),
+        ("m_vecViewOffset", o_view_offset),
+    ):
+        if not v:
+            wb_missing.append(n)
+
+    # Деградирующие проверки: офсет нет -> проверка выключается, а не стреляет вслепую
+    o_team = _need("m_iTeamNum")
+    o_flags = _need("m_fFlags")
+    o_velocity = _need("m_vecVelocity")
+
+    if not o_team:
+        print("[triggerbot] m_iTeamNum отсутствует - team check отключён (обнови output/)")
+        logutil.debug("[triggerbot] m_iTeamNum missing - team check disabled")
+    if not o_flags:
+        print("[triggerbot] m_fFlags отсутствует - проверка 'на земле' отключена")
+        logutil.debug("[triggerbot] m_fFlags missing - ground check disabled")
+    if not o_velocity:
+        print("[triggerbot] m_vecVelocity отсутствует - проверка скорости отключена")
+        logutil.debug("[triggerbot] m_vecVelocity missing - speed check disabled")
+
+    if wb_missing:
+        msg = "[triggerbot] автоволл отключён, нет оффсетов: " + ", ".join(wb_missing)
+        print(msg)
+        logutil.debug(msg)
+
+    # Включение/выключение тоглом - общий движок (toggle_registry), воркер
+    # только читает EnableTriggerbot. Старт с сохранённым состоянием.
 
     # FOV автоволла - всегда адаптивный
     wallbang_fov_points = [
@@ -155,25 +273,11 @@ def TriggerbotThreadFunction(Options, Offsets):
         (700.0, 0.45),
         (1000.0, 0.3),
         (1500.0, 0.18),
+        (3000.0, 0.9),
     ]
 
     LOOP_SLEEP = 0.015
     WALLBANG_EXTRA_SLEEP = 0.004
-
-    dwLocalPlayerPawn_off = getattr(Offsets.offset, "dwLocalPlayerPawn", 37392664)
-    dwEntityList_off = getattr(Offsets.offset, "dwEntityList", 39141456)
-    dwViewAngles_off = getattr(Offsets.offset, "dwViewAngles", 0)
-    m_iHealth_off = getattr(Offsets.offset, "m_iHealth", 844)
-    m_iTeamNum_off = getattr(Offsets.offset, "m_iTeamNum", 999)
-    m_iIDEntIndex_off = getattr(Offsets.offset, "m_iIDEntIndex", 13356)
-    m_fFlags_off = getattr(Offsets.offset, "m_fFlags", 1012)
-    m_vecVelocity_off = getattr(Offsets.offset, "m_vecVelocity", 1072)
-    m_vOldOrigin_off = getattr(Offsets.offset, "m_vOldOrigin", 5048)
-    m_vecViewOffset_off = getattr(Offsets.offset, "m_vecViewOffset", 3704)
-    m_hPlayerPawn_off = getattr(Offsets.offset, "m_hPlayerPawn", 2324)
-    m_pGameSceneNode_off = getattr(Offsets.offset, "m_pGameSceneNode", 816)
-    m_modelState_off = getattr(Offsets.offset, "m_modelState", 320)
-    m_angEyeAngles_off = getattr(Offsets.offset, "m_angEyeAngles", 13136)
 
     last_exception_time = 0.0
     last_gc_time = 0.0
@@ -185,16 +289,6 @@ def TriggerbotThreadFunction(Options, Offsets):
             if now - last_gc_time >= 5.0:
                 gc.collect()
                 last_gc_time = now
-
-            # Хоткей читается ДО проверки общего включения - иначе он не смог бы
-            # включить триггер обратно. Нажатие переключает общий EnableTriggerbot
-            # (галочка в GUI синхронизируется через _sync_external).
-            if to_bool(Options.get("EnableTriggerbotKeyCheck", True), True):
-                key_code = Options.get("TriggerbotKey", 17)
-                current_state = bool(win32api.GetAsyncKeyState(key_code) & 0x8000)
-                if current_state and not prev_key_state:
-                    Options["EnableTriggerbot"] = not to_bool(Options.get("EnableTriggerbot", False), False)
-                prev_key_state = current_state
 
             if not to_bool(Options.get("EnableTriggerbot", False), False):
                 time.sleep(0.05)
@@ -210,21 +304,33 @@ def TriggerbotThreadFunction(Options, Offsets):
                 time.sleep(0.02)
                 continue
 
-            local_pawn = safe_read_ptr(process, client + dwLocalPlayerPawn_off)
+            local_pawn = safe_read_ptr(process, client + o_local_pawn)
             if not valid_ptr(local_pawn):
                 time.sleep(0.02)
                 continue
 
-            local_hp = safe_read_int(process, local_pawn + m_iHealth_off, 0)
+            local_hp = safe_read_int(process, local_pawn + o_health, 0)
             if local_hp <= 0:
                 time.sleep(0.01)
                 continue
 
-            local_origin = safe_read_vec(process, local_pawn + m_vOldOrigin_off)
-            view_offset = safe_read_vec(process, local_pawn + m_vecViewOffset_off)
-            if local_origin is None or view_offset is None:
+            local_origin = safe_read_vec(process, local_pawn + o_origin)
+            if local_origin is None:
                 time.sleep(LOOP_SLEEP)
                 continue
+
+            team_check = to_bool(Options.get("EnableTriggerbotTeamCheck", False), False) and bool(o_team)
+            require_ground = to_bool(Options.get("TriggerbotRequireGround", True), True) and bool(o_flags)
+            speed_threshold = to_float(Options.get("TriggerbotSpeedThreshold", 5.0), 5.0) if o_velocity else 0.0
+
+            if wb_missing:
+                wallbang_mode = False
+            else:
+                view_offset = safe_read_vec(process, local_pawn + o_view_offset)
+                if view_offset is None:
+                    time.sleep(LOOP_SLEEP)
+                    continue
+                wallbang_mode = to_bool(Options.get("TriggerbotWallbang", False), False)
 
             eye_pos = Vector3(
                 local_origin.x + view_offset.x,
@@ -232,10 +338,6 @@ def TriggerbotThreadFunction(Options, Offsets):
                 local_origin.z + view_offset.z
             )
 
-            wallbang_mode = to_bool(Options.get("TriggerbotWallbang", False), False)
-            team_check = to_bool(Options.get("EnableTriggerbotTeamCheck", False), False)
-            require_ground = to_bool(Options.get("TriggerbotRequireGround", True), True)
-            speed_threshold = to_float(Options.get("TriggerbotSpeedThreshold", 5.0), 5.0)
             shot_delay = to_float(Options.get("TriggerbotShotDelay", 0.4), 0.4)
 
             target = None
@@ -243,20 +345,20 @@ def TriggerbotThreadFunction(Options, Offsets):
             target_dist = 0.0
 
             if not wallbang_mode:
-                # ОБЫЧНЫЙ режим: исходная логика через m_iIDEntIndex
-                local_id = safe_read_int(process, local_pawn + m_iIDEntIndex_off, 0)
+                # ОБЫЧНЫЙ режим: через m_iIDEntIndex
+                local_id = safe_read_int(process, local_pawn + o_id_ent_index, 0)
                 if local_id > 0:
-                    entlist = safe_read_ptr(process, client + dwEntityList_off)
+                    entlist = safe_read_ptr(process, client + o_entity_list)
                     if valid_ptr(entlist):
                         entry = safe_read_ptr(process, entlist + 0x8 * (local_id >> 9) + 0x10)
                         if valid_ptr(entry):
                             maybe_target = safe_read_ptr(process, entry + 112 * (local_id & 0x1FF))
                             if valid_ptr(maybe_target) and maybe_target != local_pawn:
-                                hp = safe_read_int(process, maybe_target + m_iHealth_off, 0)
+                                hp = safe_read_int(process, maybe_target + o_health, 0)
                                 if 0 < hp <= 100:
                                     target = maybe_target
                                     target_hp = hp
-                                    t_origin = safe_read_vec(process, maybe_target + m_vOldOrigin_off)
+                                    t_origin = safe_read_vec(process, maybe_target + o_origin)
                                     if t_origin is not None:
                                         target_dist = math.sqrt(
                                             (t_origin.x - local_origin.x) ** 2 +
@@ -266,16 +368,16 @@ def TriggerbotThreadFunction(Options, Offsets):
             else:
                 # АВТОВОЛЛ: скан по углам, адаптивный FOV
                 view_angles_vec = None
-                if dwViewAngles_off:
-                    view_angles_vec = safe_read_vec(process, client + dwViewAngles_off)
-                if view_angles_vec is None:
-                    view_angles_vec = safe_read_vec(process, local_pawn + m_angEyeAngles_off)
+                if o_view_angles:
+                    view_angles_vec = safe_read_vec(process, client + o_view_angles)
+                if view_angles_vec is None and o_eye_angles:
+                    view_angles_vec = safe_read_vec(process, local_pawn + o_eye_angles)
                 if view_angles_vec is None:
                     time.sleep(LOOP_SLEEP)
                     continue
                 view_angles = (view_angles_vec.y, view_angles_vec.x)
 
-                entity_list = safe_read_ptr(process, client + dwEntityList_off)
+                entity_list = safe_read_ptr(process, client + o_entity_list)
                 if not valid_ptr(entity_list):
                     time.sleep(LOOP_SLEEP)
                     continue
@@ -294,7 +396,7 @@ def TriggerbotThreadFunction(Options, Offsets):
                     if not valid_ptr(controller):
                         continue
 
-                    pawn_handle = safe_read_int(process, controller + m_hPlayerPawn_off, 0)
+                    pawn_handle = safe_read_int(process, controller + o_pawn_handle, 0)
                     if pawn_handle <= 0 or pawn_handle == 0xFFFFFFFF or pawn_handle == -1:
                         continue
 
@@ -310,21 +412,21 @@ def TriggerbotThreadFunction(Options, Offsets):
                     if not valid_ptr(pawn) or pawn == local_pawn:
                         continue
 
-                    hp = safe_read_int(process, pawn + m_iHealth_off, 0)
+                    hp = safe_read_int(process, pawn + o_health, 0)
                     if hp <= 0 or hp > 100:
                         continue
 
                     if team_check:
-                        tgt_team = safe_read_int(process, pawn + m_iTeamNum_off, 0)
-                        me_team = safe_read_int(process, local_pawn + m_iTeamNum_off, 0)
+                        tgt_team = safe_read_int(process, pawn + o_team, 0)
+                        me_team = safe_read_int(process, local_pawn + o_team, 0)
                         if tgt_team not in (2, 3) or tgt_team == me_team:
                             continue
 
-                    sceneNode = safe_read_ptr(process, pawn + m_pGameSceneNode_off)
+                    sceneNode = safe_read_ptr(process, pawn + o_scene_node)
                     if not valid_ptr(sceneNode):
                         continue
 
-                    boneMatrix = safe_read_ptr(process, sceneNode + m_modelState_off + 0x80)
+                    boneMatrix = safe_read_ptr(process, sceneNode + o_model_state + 0x80)
                     if not valid_ptr(boneMatrix):
                         continue
 
@@ -360,8 +462,8 @@ def TriggerbotThreadFunction(Options, Offsets):
                 time.sleep(WALLBANG_EXTRA_SLEEP)
 
             if target and team_check:
-                tgt_team = safe_read_int(process, target + m_iTeamNum_off, 0)
-                me_team = safe_read_int(process, local_pawn + m_iTeamNum_off, 0)
+                tgt_team = safe_read_int(process, target + o_team, 0)
+                me_team = safe_read_int(process, local_pawn + o_team, 0)
                 if tgt_team not in (2, 3) or tgt_team == me_team:
                     target = None
                     target_hp = 0
@@ -371,13 +473,13 @@ def TriggerbotThreadFunction(Options, Offsets):
                 continue
 
             if require_ground:
-                flags = safe_read_int(process, local_pawn + m_fFlags_off, 1)
+                flags = safe_read_int(process, local_pawn + o_flags, 1)
                 if not (flags & 1):
                     time.sleep(LOOP_SLEEP)
                     continue
 
             if speed_threshold > 0.0:
-                velocity = safe_read_vec(process, local_pawn + m_vecVelocity_off)
+                velocity = safe_read_vec(process, local_pawn + o_velocity)
                 if velocity is None:
                     velocity = Vector3(0.0, 0.0, 0.0)
                 speed = math.sqrt(

@@ -3,20 +3,31 @@ import math
 import os
 import struct
 import time
+
 from functions import memfuncs
+from functions import logutil
 from functions.process_watcher import ProcessConnector
 
+# ==================== Периодика и лимиты (не оффсеты) ====================
 SCAN_INTERVAL_SEC = 0.10
 MAX_ENTITIES_CAP = 2048
+# Фоллбек-верхняя граница скана: если highestEntityIndex не читается,
+# сканируем не больше этого количества слотов
+FALLBACK_MAX_INDEX = 1024
 
+# ==================== Валидация указателей ====================
 MASK64   = 0xFFFFFFFFFFFFFFFF
 USER_LOW  = 0x0000000000100000
 USER_HIGH = 0x00007FFFFFFFFFFF
 
-# Структурные константы entity-листа (в дампе их нет,
-# те же числа, что и в spectator.py: страйд 112, identity на +0x10)
-ENTITY_LIST_STRIDE     = 112
-ENTITY_IDENTITY_OFFSET = 0x10
+# ==================== Структурные константы entity-листа ====================
+# В дампах cs2-dumper их нет по определению. Те же значения использует
+# вся кодовая база (esp/core, spectator, aimbot, triggerbot, bhop).
+ENT_BUCKET_STEP = 0x8
+ENT_IDENTITY = 0x10
+ENT_STRIDE = 112
+HANDLE_SER_MASK = 0x7FFF
+HANDLE_IDX_MASK = 0x1FF
 
 SMOKE_CLASS_NAME = "smokegrenade_projectile"
 
@@ -27,88 +38,79 @@ TOP_ELEV_DEG    = 45.0           # высота боковых верхних т
 TOP_AZIMUTH_DEG = (45.0, 135.0, 225.0, 315.0)
 MARKER_COLOR    = "#9FB6DE"
 
-def _find_dump_path():
-    """Ищет дамп client_dll.json: сначала известные пути, потом любой json
-    в output/, содержащий класс смока."""
+# Как часто обновлять локальную копию настройки (Options - IPC-прокси)
+OPTS_REFRESH = 0.5
+
+# ==================== Дамп client_dll.json ====================
+# Единый конвейер известных путей (как в fovchanger/bombtimer):
+# батник жёстко кладёт client_dll.json в output/, альтернативные имена
+# и поисковый проход по всем json не нужны.
+
+_json_cache = {}
+
+
+def _find_dump_dir():
     base = os.path.dirname(os.path.abspath(__file__))
     repo = os.path.abspath(os.path.join(base, ".."))
-    candidates = [
-        os.path.join(repo, "output", "client_dll.json"),
-        os.path.join(repo, "client_dll.json"),
-        os.path.join(repo, "ext", "client_dll.json"),
-        os.path.join(base, "client_dll.json"),
-    ]
-    for c in candidates:
-        if os.path.exists(c):
+    for c in (os.path.join(repo, "output"), repo, os.path.join(repo, "ext"), base):
+        if os.path.exists(os.path.join(c, "client_dll.json")):
             return c
-    out_dir = os.path.join(repo, "output")
-    try:
-        for fn in sorted(os.listdir(out_dir)):
-            if not fn.lower().endswith(".json"):
-                continue
-            p = os.path.join(out_dir, fn)
-            try:
-                with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                    if "C_SmokeGrenadeProjectile" in f.read():
-                        return p
-            except Exception:
-                continue
-    except Exception:
-        pass
     return None
 
-_DUMP_PATH = _find_dump_path()
 
-def _load_dump_fields(path):
-    """Достаёт нужные оффсеты напрямую из дампа, чтобы модуль не зависел
-    от того, что решил выставить ext/offsets."""
-    if not path:
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+_DUMP_DIR = _find_dump_dir()
 
-        def strip_keys(d):
-            if isinstance(d, dict):
-                return {str(k).strip(): strip_keys(v) for k, v in d.items()}
-            return d
 
-        data = strip_keys(raw)
-        classes = data.get("client.dll", {}).get("classes", {})
-        wanted = ("CEntityIdentity", "C_BaseEntity", "CGameSceneNode", "C_SmokeGrenadeProjectile")
-        out = {}
-        for cls in wanted:
-            fields = classes.get(cls, {}).get("fields", {})
-            for k, v in fields.items():
-                out.setdefault(k, v)
-        return out
-    except Exception:
-        return {}
+def _dump_json(filename):
+    if filename in _json_cache:
+        return _json_cache[filename]
+    data = {}
+    if _DUMP_DIR:
+        try:
+            with open(os.path.join(_DUMP_DIR, filename), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    _json_cache[filename] = data or {}
+    return _json_cache[filename]
 
-_DUMP_FIELDS = _load_dump_fields(_DUMP_PATH)
+
+_SCHEMA = {}
+_jd = _dump_json("client_dll.json")
+try:
+    for _cdata in _jd.get("client.dll", {}).get("classes", {}).values():
+        for _fname, _fval in (_cdata.get("fields") or {}).items():
+            _SCHEMA.setdefault(str(_fname).strip(), int(_fval))
+except Exception:
+    pass
+
+
+def _sf(name):
+    """Оффсет поля схемы из дампа; 0 если дампа нет или поля нет."""
+    return _SCHEMA.get(name, 0)
+
 
 def _off(off, name):
-    """Оффсет берём из Offsets.offset; если его там нет - из дампа."""
+    """dataclass -> дамп. Ноль = под-фича отключается (не fallback-число)."""
     val = 0
     try:
-        val = getattr(off, name, 0) or 0
+        val = int(getattr(off, name, 0) or 0)
     except Exception:
         val = 0
     if not val:
-        val = _DUMP_FIELDS.get(name, 0) or 0
+        val = _sf(name)
     return val
+
 
 def _build_marker_segments():
     """Каркас 'купола': пары точек на единичной сфере (радиус 1)."""
     segs = []
-    # Нижняя окружность: точки соединяются с соседними
     ring = []
     for i in range(RING_POINTS):
         a = 2.0 * math.pi * i / RING_POINTS
         ring.append((math.cos(a), math.sin(a), 0.0))
     for i in range(RING_POINTS):
         segs.append((ring[i], ring[(i + 1) % RING_POINTS]))
-    # Верх: 4 боковые точки + центральная (вершина), все на том же радиусе
     elev = math.radians(TOP_ELEV_DEG)
     h  = math.sin(elev)
     r2 = math.cos(elev)
@@ -118,11 +120,13 @@ def _build_marker_segments():
         top.append((math.cos(a) * r2, math.sin(a) * r2, h))
     apex = (0.0, 0.0, 1.0)
     for i in range(len(top)):
-        segs.append((top[i], top[(i + 1) % len(top)]))  # соседние боковые между собой
-        segs.append((top[i], apex))                     # каждая с центральной
+        segs.append((top[i], top[(i + 1) % len(top)]))
+        segs.append((top[i], apex))
     return segs
 
+
 _MARKER_SEGMENTS = _build_marker_segments()
+
 
 def to_u64(x):
     try:
@@ -130,9 +134,11 @@ def to_u64(x):
     except Exception:
         return 0
 
+
 def is_valid_ptr(p):
     p = to_u64(p)
     return USER_LOW <= p <= USER_HIGH
+
 
 def rd_ptr(h, addr):
     try:
@@ -142,11 +148,13 @@ def rd_ptr(h, addr):
     except Exception:
         return 0
 
+
 def rd_bool(h, addr):
     try:
         return bool(memfuncs.ProcMemHandler.ReadBool(h, addr))
     except Exception:
         return False
+
 
 def rd_int(h, addr):
     try:
@@ -154,11 +162,13 @@ def rd_int(h, addr):
     except Exception:
         return 0
 
+
 def rd_bytes(h, addr, n):
     try:
         return memfuncs.ProcMemHandler.ReadBytes(h, addr, n)
     except Exception:
         return b""
+
 
 def read_cstr_utf8(h, addr, maxlen=64):
     if not addr:
@@ -171,25 +181,28 @@ def read_cstr_utf8(h, addr, maxlen=64):
     except Exception:
         return ""
 
+
 def ent_by_index(h, entlist_ptr, i):
-    """Получить entity по индексу (та же логика, что в spectator.py)"""
-    entry2 = rd_ptr(h, entlist_ptr + 0x8 * (i >> 9) + 0x10)
+    """Entity по индексу: bucket по (i >> 9), слот по страйду 112."""
+    entry2 = rd_ptr(h, entlist_ptr + ENT_BUCKET_STEP * (i >> 9) + ENT_IDENTITY)
     if not entry2:
         return 0
-    e = rd_ptr(h, entry2 + ENTITY_LIST_STRIDE * (i & 0x1FF))
+    e = rd_ptr(h, entry2 + ENT_STRIDE * (i & HANDLE_IDX_MASK))
     return e if is_valid_ptr(e) else 0
 
+
 def get_class_name(h, entity_ptr, name_off):
-    """Имя класса entity через CEntityIdentity::m_designerName (оффсет из дампа)"""
+    """Имя класса entity через CEntityIdentity::m_designerName (оффсет из дампа)."""
     if not name_off:
         return ""
-    identity = rd_ptr(h, entity_ptr + ENTITY_IDENTITY_OFFSET)
+    identity = rd_ptr(h, entity_ptr + ENT_IDENTITY)
     if not identity:
         return ""
     name_ptr = rd_ptr(h, identity + name_off)
     if not name_ptr:
         return ""
     return read_cstr_utf8(h, name_ptr, 48)
+
 
 def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
@@ -199,12 +212,22 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
     pos_off  = _off(off, "m_vSmokeDetonationPos")
     name_off = _off(off, "m_designerName")
 
+    # Деградация: нет полей смока в дампе - модуль фактически не работает
+    if not did_off or not pos_off or not name_off:
+        print("[nosmoke] поля смока отсутствуют в дампе - модуль отключён. "
+              "Обнови output/ (запусти CS2, потом cs2-dumper -f json)", flush=True)
+
+    enable_local = bool(Options.get("EnableNoSmoke", False))
+    opts_ts = time.time()
+
     while True:
         try:
-            hproc = connector.ensure_process()
-            client = connector.ensure_module("client.dll")
+            now = time.time()
+            if now - opts_ts >= OPTS_REFRESH:
+                enable_local = bool(Options.get("EnableNoSmoke", False))
+                opts_ts = now
 
-            if not bool(Options.get("EnableNoSmoke", False)):
+            if not enable_local:
                 if Runtime is not None:
                     try:
                         Runtime.smokes = []
@@ -213,16 +236,19 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
                 time.sleep(0.25)
                 continue
 
+            hproc = connector.ensure_process()
+            client = connector.ensure_module("client.dll")
+
             entlist_ptr = rd_ptr(hproc, client + off.dwEntityList)
             if not entlist_ptr:
                 time.sleep(SCAN_INTERVAL_SEC)
                 continue
 
             # До какого индекса сканировать: highestEntityIndex из дампа, с ограничителем
-            hi_off = getattr(off, "dwGameEntitySystem_highestEntityIndex", 0) or 0
+            hi_off = int(getattr(off, "dwGameEntitySystem_highestEntityIndex", 0) or 0)
             highest = rd_int(hproc, entlist_ptr + hi_off) if hi_off else 0
             if highest < 64:
-                highest = 1024
+                highest = FALLBACK_MAX_INDEX
             max_idx = min(highest + 1, MAX_ENTITIES_CAP)
 
             smokes = []
@@ -259,23 +285,29 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
 
             time.sleep(SCAN_INTERVAL_SEC)
 
-        except Exception:
+        except Exception as exc:
+            logutil.debug(f"[nosmoke] loop exception: {exc}")
             connector.invalidate()
             time.sleep(0.5)
 
+
 def render_smoke_markers(pme, processHandle, clientBase, off, smokes, screen_w, screen_h):
     """Рисует каркас-купол на месте каждого удалённого смока."""
-    vm_off = getattr(off, "dwViewMatrix", 0) or 0
+    vm_off = int(getattr(off, "dwViewMatrix", 0) or 0)
     if not vm_off:
         return
     try:
         vm_bytes = memfuncs.ProcMemHandler.ReadBytes(processHandle, clientBase + vm_off, 64)
     except Exception:
         return
+    if not vm_bytes or len(vm_bytes) < 64:
+        return
     vm = struct.unpack("16f", vm_bytes)
 
-    col_near = pme.fade_color(pme.get_color(MARKER_COLOR), 0.90)  # ближняя половина ярче
-    col_far  = pme.fade_color(pme.get_color(MARKER_COLOR), 0.35)  # дальняя - тусклее
+    # Цвета маркера - один раз на кадр, не на сегмент
+    base_col = pme.get_color(MARKER_COLOR)
+    col_near = pme.fade_color(base_col, 0.90)
+    col_far  = pme.fade_color(base_col, 0.35)
 
     def _proj(x, y, z):
         """Мировые координаты -> пиксели экрана (NDC -> pixels)."""

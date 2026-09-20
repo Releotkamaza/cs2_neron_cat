@@ -1,17 +1,17 @@
 from functions import memfuncs
 from functions import logutil
 from functions.process_watcher import ProcessConnector
+import json
+import os
 import time
 
 DEFAULT_FOV = 90
 SCOPE_FOV_MAX = 89
 
 # Сколько держим трубу перед снятием
-# Сделал чуть позже, чем было
-SCOPE_ENTER_GRACE_SEC = 1.45
+SCOPE_ENTER_GRACE_SEC = 0.2
 
-# Сколько после выхода из скоупа не форсим FOV напрямую
-# Увеличил на 0.1 сек, чтобы убрать одиночный передёрг
+# Сколько после выхода из скоупа не форсим FOV напрямую (гасит одиночный передёрг)
 SCOPE_EXIT_GRACE_SEC = 0.40
 
 # Дебаунс состояния скоупа
@@ -21,14 +21,13 @@ SCOPE_STATE_DEBOUNCE = 0.12
 SCOPE_DESIRED_DELAY = 0.05
 
 # Если FOV сам не вернулся, форсим его через этот таймаут
-# Тоже чуть отодвинул, чтобы не влезал слишком рано
 SCOPE_FORCE_FOV_AFTER = 0.75
 
-# Насколько долго разрешаем считать сырой флаг m_bIsScoped началом скоупа,
+# Сколько долго сырой флаг m_bIsScoped можно считать началом скоупа,
 # даже если FOV ещё не начал падать
 RAW_SCOPE_ONLY_GRACE = 0.25
 
-# Маленький мостик, чтобы не терять скоуп на единичных пропаданиях сигнала
+# Мостик, чтобы не терять скоуп на единичных пропаданиях сигнала
 ACTUAL_ZOOM_BRIDGE = 0.12
 
 # Сколько времени после нажатия кнопки zoom считаем, что начался вход в скоуп
@@ -37,50 +36,134 @@ ZOOM_PRESS_GRACE = 0.35
 # Сколько времени считаем, что FOV всё ещё уходит в зум
 ZOOM_IN_BRIDGE = 0.12
 
-# Сколько ждать перед принудительным выходом из "залипшего" скоупа.
-# Увеличил, чтобы не убивать второй уровень скоупа из-за единичного глюка.
+# Сколько ждать перед принудительным выходом из "залипшего" скоупа
 ZOOM_LOST_TIMEOUT = 0.80
 
 FOV_RATE_EPS = 0.001
 
-# из твоего buttons.json: client.dll -> zoom
-ZOOM_BUTTON_OFFSET = 37604112
+# ==================== Оффсеты ====================
+# Ноль числовых констант. Ядро (dw*-оффсеты, m_pCameraServices, m_lifeState,
+# m_iFOV, m_bIsScoped) - из dataclass ext/offsets.py (он сам умеет фоллбек
+# на дамп/URL). Схемные поля и кнопка zoom - из output/*.json (cs2-dumper),
+# батник регенерит их при каждом запуске.
+# Чего в дампе нет - соответствующая под-фича отключается, никаких fallback-чисел.
+
+_json_cache = {}
+
+
+def _find_dump_dir():
+    base = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.abspath(os.path.join(base, ".."))
+    for c in (os.path.join(repo, "output"), repo, os.path.join(repo, "ext"), base):
+        if os.path.exists(os.path.join(c, "client_dll.json")) or os.path.exists(os.path.join(c, "buttons.json")):
+            return c
+    return None
+
+
+_DUMP_DIR = _find_dump_dir()
+
+
+def _dump_json(filename):
+    if filename in _json_cache:
+        return _json_cache[filename]
+    data = {}
+    if _DUMP_DIR:
+        try:
+            with open(os.path.join(_DUMP_DIR, filename), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    _json_cache[filename] = data or {}
+    return _json_cache[filename]
+
+
+# Плоский словарь "имя поля -> оффсет" по всем классам client_dll.json
+_SCHEMA = {}
+_jd = _dump_json("client_dll.json")
+try:
+    for _cdata in _jd.get("client.dll", {}).get("classes", {}).values():
+        for _fname, _fval in (_cdata.get("fields") or {}).items():
+            _SCHEMA.setdefault(str(_fname).strip(), int(_fval))
+except Exception:
+    pass
+
+
+def _button_off(name):
+    jd = _dump_json("buttons.json")
+    try:
+        return int(jd["client.dll"][name])
+    except Exception:
+        return 0
 
 
 def FovChangerThreadFunction(Options, Offsets):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
 
-    def _off(name, fallback):
+    # --- Ядро: только dataclass, без них модуль неработоспособен ---
+    def _dc(name):
         try:
-            v = int(getattr(Offsets.offset, name, 0))
-            return v if v != 0 else fallback
+            return int(getattr(Offsets.offset, name, 0) or 0)
         except Exception:
-            return fallback
+            return 0
 
-    # Базовые оффсеты
-    o_local_pawn = _off("dwLocalPlayerPawn", 37515880)
-    o_local_controller = _off("dwLocalPlayerController", 37363504)
-    o_entity_list = _off("dwEntityList", 39264816)
+    o_local_pawn = _dc("dwLocalPlayerPawn")
+    o_local_controller = _dc("dwLocalPlayerController")
+    o_entity_list = _dc("dwEntityList")
+    o_camera_services = _dc("m_pCameraServices")
+    o_life_state = _dc("m_lifeState")
+    o_fov = _dc("m_iFOV")
+    o_scoped = _dc("m_bIsScoped")
 
-    # Pawn / services
-    o_camera_services = _off("m_pCameraServices", 4672)
-    o_weapon_services = _off("m_pWeaponServices", 4616)
-    o_life_state = _off("m_lifeState", 852)
+    _required = {
+        "dwLocalPlayerPawn": o_local_pawn,
+        "dwLocalPlayerController": o_local_controller,
+        "dwEntityList": o_entity_list,
+        "m_pCameraServices": o_camera_services,
+        "m_lifeState": o_life_state,
+        "m_iFOV": o_fov,
+        "m_bIsScoped": o_scoped,
+    }
+    _missing = [k for k, v in _required.items() if not v]
+    if _missing:
+        # flush обязателен: воркер живёт в дочернем процессе multiprocessing
+        print("[fovchanger] OFF - нет оффсетов: " + ", ".join(_missing), flush=True)
+        while True:
+            time.sleep(5)
+        return
 
-    # Camera FOV
-    o_fov = _off("m_iFOV", 656)
-    o_fov_start = _off("m_iFOVStart", 660)
-    o_fov_rate = _off("m_flFOVRate", 668)
-    o_desired_fov = _off("m_iDesiredFOV", 1932)
+    # --- Схемные поля: dataclass -> дамп. Нет ни там, ни там - 0. ---
+    def _schema(name):
+        v = _dc(name)
+        if v:
+            return v
+        return _SCHEMA.get(name, 0)
 
-    # Scope flags
-    o_scoped = _off("m_bIsScoped", 7288)
-    o_resume_zoom = _off("m_bResumeZoom", 7289)
-    o_old_scoped = _off("m_bOldIsScoped", 7348)
+    o_weapon_services = _schema("m_pWeaponServices")
+    o_fov_start = _schema("m_iFOVStart")
+    o_fov_rate = _schema("m_flFOVRate")
+    o_desired_fov = _schema("m_iDesiredFOV")
+    o_resume_zoom = _schema("m_bResumeZoom")
+    o_old_scoped = _schema("m_bOldIsScoped")
+    o_active_weapon = _schema("m_hActiveWeapon")
+    o_zoom_level = _schema("m_zoomLevel")
 
-    # Weapon
-    o_active_weapon = 96
-    o_zoom_level = 7392
+    o_zoom_button = _button_off("zoom")
+
+    # Разовая строка о деградации, если дамп неполный (в норме молчит)
+    _schema_map = {
+        "m_pWeaponServices": o_weapon_services,
+        "m_hActiveWeapon": o_active_weapon,
+        "m_iFOVStart": o_fov_start,
+        "m_flFOVRate": o_fov_rate,
+        "m_iDesiredFOV": o_desired_fov,
+        "m_bResumeZoom": o_resume_zoom,
+        "m_bOldIsScoped": o_old_scoped,
+        "m_zoomLevel": o_zoom_level,
+        "button:zoom": o_zoom_button,
+    }
+    _gone = [k for k, v in _schema_map.items() if not v]
+    if _gone:
+        print("[fovchanger] деградация, нет в дамапе: " + ", ".join(_gone), flush=True)
 
     def _clamp(v, lo, hi):
         try:
@@ -125,12 +208,14 @@ def FovChangerThreadFunction(Options, Offsets):
 
     def _read_zoom_button_down(proc, client_base):
         """
-        Пытаемся прочитать кнопку zoom из buttons.json.
-        Важно: я специально принимаю только маленькие/похожие на состояние значения,
-        чтобы не словить ложный скоуп, если там вдруг лежит указатель или мусор.
+        Читает кнопку zoom из buttons.json.
+        Принимаются только маленькие/похожие на состояние значения,
+        чтобы не словить ложный скоуп, если там указатель или мусор.
         """
+        if not o_zoom_button:
+            return False
         try:
-            val = int(memfuncs.ProcMemHandler.ReadInt(proc, client_base + ZOOM_BUTTON_OFFSET))
+            val = int(memfuncs.ProcMemHandler.ReadInt(proc, client_base + o_zoom_button))
 
             # Самый частый вариант состояния кнопки - маленькое число.
             if 0 <= val <= 32:
@@ -177,7 +262,7 @@ def FovChangerThreadFunction(Options, Offsets):
 
     def _get_active_weapon(proc, client_base, local_pawn):
         try:
-            if not o_weapon_services:
+            if not o_weapon_services or not o_active_weapon:
                 return 0
 
             weapon_services = memfuncs.ProcMemHandler.ReadPointer(proc, local_pawn + o_weapon_services)
@@ -200,6 +285,8 @@ def FovChangerThreadFunction(Options, Offsets):
             return 0
 
     def _read_zoom_level(proc, client_base, local_pawn):
+        if not o_zoom_level:
+            return -1
         try:
             ent = _get_active_weapon(proc, client_base, local_pawn)
             if not ent:
@@ -300,8 +387,7 @@ def FovChangerThreadFunction(Options, Offsets):
 
             now = time.time()
 
-            # Кнопка zoom.
-            # Используем только как ранний сигнал входа.
+            # Кнопка zoom - только ранний сигнал входа.
             zoom_button_down = _read_zoom_button_down(process, client)
 
             if zoom_button_down and not prev_zoom_button_down and not in_scope:
@@ -327,7 +413,7 @@ def FovChangerThreadFunction(Options, Offsets):
 
             prev_raw_scoped = bool(raw_scoped)
 
-            # Сырой флаг скоупа разрешаем как сигнал входа только короткое время.
+            # Сырой флаг скоупа - сигнал входа только короткое время.
             raw_scope_allowed = (
                 bool(raw_scoped)
                 and raw_scoped_true_since > 0.0
@@ -408,15 +494,15 @@ def FovChangerThreadFunction(Options, Offsets):
                         if o_scoped:
                             _write_bool(process, local_pawn + o_scoped, False)
 
-                        # Дополнительно гасим то, что может заставлять игру возвращать zoom/scope
+                        # Гасим то, что может заставлять игру возвращать zoom/scope
                         if o_resume_zoom:
                             _write_bool(process, local_pawn + o_resume_zoom, False)
 
                         if o_old_scoped:
                             _write_bool(process, local_pawn + o_old_scoped, False)
 
-                        # Если игра вдруг пытается вытащить FOV из зума,
-                        # а оружие всё ещё реально в zoom, удерживаем зум-FOV.
+                        # Игра пытается вытащить FOV из зума, а оружие всё ещё
+                        # реально в zoom - удерживаем зум-FOV.
                         if zoom_level > 0 and locked_scope_fov > 0 and current_fov > SCOPE_FOV_MAX:
                             protect_fov = locked_scope_fov
                             try:
@@ -428,9 +514,7 @@ def FovChangerThreadFunction(Options, Offsets):
                             except Exception:
                                 pass
 
-                        # Безопасный unstick.
-                        # Раньше он мог сработать слишком быстро и случайно убить второй уровень скоупа.
-                        # Теперь форсим выход только если:
+                        # Безопасный unstick: форсим выход только если
                         # - оружие уже точно не в zoom
                         # - флага скоупа нет
                         # - FOV остался низким
@@ -498,7 +582,7 @@ def FovChangerThreadFunction(Options, Offsets):
                 and ((not fov_moving) or hard_force_fov)
             )
 
-            # Прямой форс текущего FOV делаем после короткого хвоста анимации
+            # Прямой форс текущего FOV - после короткого хвоста анимации
             allow_direct_fov = (
                 time_since_scope >= SCOPE_EXIT_GRACE_SEC
                 and ((not fov_moving) or hard_force_fov)

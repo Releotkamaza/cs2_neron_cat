@@ -1,63 +1,87 @@
+# markers: START features/esp/core.py v5.1
 from ext.datatypes import *
 from functions import memfuncs
 from functions import calculations
-from functions import logutil
 import globals
 import pyMeow as pme
 from features import spectator
-from .draw import draw_box, draw_skeleton, draw_distance, draw_health_text, draw_name, draw_health_bar
+from features import nosmoke as _ns_mod
+from features import noscopedot
+from .draw import (draw_box, draw_skeleton, draw_distance, draw_health_text,
+                   draw_name, draw_health_bar, draw_bomb_status_card)
 from .fonts import _find_overlay_font, _ensure_raylib_font, _get_overlay_font_handle
 from .colors import resolve_color, health_color_hex
 from .visibility import resolve_local_index, is_visible_to_local
-import win32api, win32gui, win32process, win32con, os
+import threading
 import time
+import struct
+import win32api, win32gui, win32process, win32con, os
 from collections import namedtuple
 import math as _m
 
-CachedEntity = namedtuple('CachedEntity', ['team', 'health', 'origin', 'head', 'bones', 'name', 'visible'])
+# ==================== Кэши цветов ====================
+# Парсинг hex убран из покадровых вызовов
+_col_cache = {}
+_health_hex_cache = {}
+_health_col_cache = {}
+
+
+def _col(hexstr):
+    c = _col_cache.get(hexstr)
+    if c is None:
+        c = resolve_color(hexstr)
+        _col_cache[hexstr] = c
+    return c
+
+
+def _health_hex(hp):
+    h = _health_hex_cache.get(hp)
+    if h is None:
+        h = health_color_hex(hp)
+        _health_hex_cache[hp] = h
+    return h
+
+
+def _health_col(hp):
+    c = _health_col_cache.get(hp)
+    if c is None:
+        c = _col(_health_hex(hp))
+        _health_col_cache[hp] = c
+    return c
+
+
+CachedEntity = namedtuple('CachedEntity',
+                          ['team', 'is_enemy', 'health', 'origin', 'head', 'bones',
+                           'pelvis', 'name', 'visible', 'dist'])
+
+# ==================== Структурные константы ====================
+# В дампах cs2-dumper их нет по определению (дамп отдаёт только поля схем
+# и кнопки). Те же значения использует вся кодовая база
+# (aimbot/triggerbot/nosmoke/bhop); после обновления игры правятся здесь.
+ENT_BUCKET_STEP = 0x8      # шаг бакетов entity list
+ENT_IDENTITY = 0x10        # смещение CEntityIdentity в слоте
+ENT_STRIDE = 112           # stride слота (контроллеры и павны)
+HANDLE_SER_MASK = 0x7FFF   # серийно-индексные биты handle
+HANDLE_IDX_MASK = 0x1FF    # индекс внутри бакета
+BONE_STRIDE = 32           # размер записи кости в boneMatrix
+BONE_ARRAY_OFF = 0x80      # boneArray внутри model state
+BONE_SPAN = 27             # старший используемый индекс кости (eye_R=26) + 1
+LIFESTATE_ALIVE = 256
+BOX_TOP_OFFSET = 70.0      # верх коробки над origin
+MIN_TARGET_DIST = 35.0     # отсечка по дистанции до локального игрока
+TRACER_BONE_INDEX = 0      # кость 0: таз, низ-центр модели - крепление трейсеров
+
+# ==================== Кэш имён ====================
+# Валидное имя кэшируется на NAME_TTL_OK, неудачное ("?") перечитывается
+# каждые NAME_TTL_RETRY секунд.
+NAME_TTL_OK = 10.0
+NAME_TTL_RETRY = 1.5
 
 _ELLIPSE_STEPS = 14
 _ELLIPSE_UNIT = [
     (_m.cos(2.0 * _m.pi * k / _ELLIPSE_STEPS), _m.sin(2.0 * _m.pi * k / _ELLIPSE_STEPS))
     for k in range(_ELLIPSE_STEPS)
 ]
-
-
-def _calc_head_center(processHandle, boneMatrix):
-    eye_L = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (25 * 32))
-    eye_R = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (26 * 32))
-    neck = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (6 * 32))
-    fallback_head = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (7 * 32))
-
-    if eye_L and eye_R and neck:
-        mid_x = (eye_L.x + eye_R.x) / 2.0
-        mid_y = (eye_L.y + eye_R.y) / 2.0
-        mid_z = (eye_L.z + eye_R.z) / 2.0
-
-        vx = mid_x - neck.x
-        vy = mid_y - neck.y
-        vz = mid_z - neck.z
-
-        length = (vx * vx + vy * vy + vz * vz) ** 0.5
-        if length > 0.01:
-            head_x = mid_x - (vx / length) * 4.0
-            head_y = mid_y - (vy / length) * 4.0
-            head_z = mid_z - (vz / length) * 4.0 + 3.0
-            return Vector3(head_x, head_y, head_z)
-
-        if fallback_head:
-            return fallback_head
-
-        return Vector3(mid_x, mid_y, mid_z + 5.0)
-
-    if fallback_head:
-        return fallback_head
-
-    if neck:
-        return neck
-
-    return Vector3(0.0, 0.0, 0.0)
-
 
 boneConnections = [
     ('neck', 'head'),
@@ -68,6 +92,61 @@ boneConnections = [
     ('pelvis', 'leg_upper_L'), ('leg_upper_L', 'leg_lower_L'), ('leg_lower_L', 'ankle_L'),
     ('pelvis', 'leg_upper_R'), ('leg_upper_R', 'leg_lower_R'), ('leg_lower_R', 'ankle_R'),
 ]
+
+
+def _head_from(eye_l, eye_r, neck, fallback):
+    """Центр головы из костей - чистая математика, без чтений памяти."""
+    if eye_l and eye_r and neck:
+        mx = (eye_l.x + eye_r.x) / 2.0
+        my = (eye_l.y + eye_r.y) / 2.0
+        mz = (eye_l.z + eye_r.z) / 2.0
+        vx = mx - neck.x
+        vy = my - neck.y
+        vz = mz - neck.z
+        length = (vx * vx + vy * vy + vz * vz) ** 0.5
+        if length > 0.01:
+            return Vector3(mx - (vx / length) * 4.0,
+                           my - (vy / length) * 4.0,
+                           mz - (vz / length) * 4.0 + 3.0)
+        if fallback:
+            return fallback
+        return Vector3(mx, my, mz + 5.0)
+    if fallback:
+        return fallback
+    if neck:
+        return neck
+    return Vector3(0.0, 0.0, 0.0)
+
+
+def _read_bones_bulk(processHandle, bone_matrix):
+    """Атомарный слепок костей: ОДНО чтение BONE_SPAN*32 байт вместо ~21
+    ReadVec. Кость 0 (таз) возвращается третьим значением - крепление
+    трейсеров, нужна даже при выключенном скелете."""
+    span = BONE_SPAN * BONE_STRIDE
+    try:
+        buf = memfuncs.ProcMemHandler.ReadBytes(processHandle, bone_matrix, span)
+    except Exception:
+        return None, None, None
+    if not buf or len(buf) < span:
+        return None, None, None
+
+    def bone(i):
+        x, y, z = struct.unpack_from('<3f', buf, i * BONE_STRIDE)
+        return Vector3(x, y, z)
+
+    eye_l = bone(25)
+    eye_r = bone(26)
+    neck = bone(6)
+    fb = bone(7)
+    head = _head_from(eye_l, eye_r, neck, fb)
+    pelvis = bone(TRACER_BONE_INDEX)
+    bones = {}
+    for bname, bidx in PLAYER_BONES.items():
+        if bname == "eye_L" or bname == "eye_R":
+            continue
+        bones[bname] = bone(bidx)
+    return head, bones, pelvis
+
 
 _last_focus_check = 0.0
 _last_focus_result = False
@@ -104,14 +183,221 @@ def _neron_has_focus():
         return False
 
 
-_scanned_cache = []
+# ==================== Поток-ридер ====================
+# Сканирование entity вынесено из рендер-потока: ридер непрерывно строит
+# снапшот, рендер-кадр читает только viewMatrix и рисует готовый список.
+
+_reader_state = {
+    "proc": None,
+    "client": 0,
+    "offsets": None,      # объект Offsets целиком (нужен .offset и visibility)
+    "opts": {},
+}
+_snapshot = []
+_snap_lock = threading.Lock()
+_name_cache = {}          # controller addr -> (name, read_ts)
+_reader_thread = None
+
+
+def _get_player_name(proc, controller, o):
+    """Имя игрока с TTL-кэшем. '?' и пустые читаются заново каждые
+    NAME_TTL_RETRY секунд, валидные держатся NAME_TTL_OK."""
+    now = time.time()
+    entry = _name_cache.get(controller)
+    if entry is not None:
+        name, ts = entry
+        ttl = NAME_TTL_OK if (name and name != "?") else NAME_TTL_RETRY
+        if now - ts < ttl:
+            return name
+    try:
+        addr = memfuncs.ProcMemHandler.ReadPointer(proc, controller + o.m_sSanitizedPlayerName)
+        name = memfuncs.ProcMemHandler.ReadString(proc, addr, 64) if addr else "?"
+    except Exception:
+        name = "?"
+    if not name or not name.strip():
+        name = "?"
+    if len(_name_cache) > 512:
+        _name_cache.clear()
+    _name_cache[controller] = (name, now)
+    return name
+
+
+def _scan_once(st):
+    proc = st["proc"]
+    client = st["client"]
+    offsets_obj = st["offsets"]
+    opts = st["opts"]
+    if offsets_obj is None:
+        return None
+    o = offsets_obj.offset
+
+    opt_team_check = bool(opts.get("EnableESPTeamCheck", False))
+    opt_skeleton = bool(opts.get("EnableESPSkeletonRendering", False))
+    opt_name = bool(opts.get("EnableESPNameText", False))
+    opt_visible = bool(opts.get("ESP_VisibleCheckBox", False))
+
+    render_required = bool(opts.get("EnableESP", True)) and any((
+        opts.get("EnableESPBoxRendering", False),
+        opts.get("EnableESPNameText", False),
+        opts.get("EnableESPDistanceText", False),
+        opts.get("EnableESPHealthText", False),
+        opts.get("EnableESPHealthBarRendering", False),
+        opts.get("EnableESPTracerRendering", False),
+        opts.get("EnableESPSkeletonRendering", False),
+    ))
+    if not render_required:
+        return []
+
+    try:
+        local_pawn = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwLocalPlayerPawn)
+        if not local_pawn:
+            return None
+        local_controller = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwLocalPlayerController)
+        local_team = memfuncs.ProcMemHandler.ReadInt(proc, local_pawn + o.m_iTeamNum)
+        local_origin = memfuncs.ProcMemHandler.ReadVec(proc, local_pawn + o.m_vOldOrigin)
+        entity_list = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwEntityList)
+    except Exception:
+        return None
+    if not entity_list or local_origin is None:
+        return None
+
+    local_index = 0
+    if opt_visible:
+        try:
+            local_index = resolve_local_index(proc, entity_list, local_controller)
+        except Exception:
+            local_index = 0
+
+    out = []
+    for i in range(64):
+        try:
+            list_entry = memfuncs.ProcMemHandler.ReadPointer(
+                proc, entity_list + (ENT_BUCKET_STEP * (i & HANDLE_SER_MASK) >> 9) + ENT_IDENTITY)
+            if not list_entry:
+                continue
+
+            controller = memfuncs.ProcMemHandler.ReadPointer(
+                proc, list_entry + ENT_STRIDE * (i & HANDLE_IDX_MASK))
+            if not controller or controller == local_controller:
+                continue
+
+            pawn_handle = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_hPlayerPawn)
+            if not pawn_handle:
+                continue
+
+            list_entry2 = memfuncs.ProcMemHandler.ReadPointer(
+                proc, entity_list + ENT_BUCKET_STEP * ((pawn_handle & HANDLE_SER_MASK) >> 9) + ENT_IDENTITY)
+            if not list_entry2:
+                continue
+
+            pawn = memfuncs.ProcMemHandler.ReadPointer(
+                proc, list_entry2 + ENT_STRIDE * (pawn_handle & HANDLE_IDX_MASK))
+            if not pawn or pawn == local_pawn:
+                continue
+
+            health = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_iHealth)
+            if health <= 0:
+                continue
+
+            team = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_iTeamNum)
+            life_state = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_lifeState)
+            if life_state != LIFESTATE_ALIVE or (opt_team_check and team == local_team):
+                continue
+
+            scene_node = memfuncs.ProcMemHandler.ReadPointer(proc, pawn + o.m_pGameSceneNode)
+            if not scene_node:
+                continue
+
+            bone_matrix = memfuncs.ProcMemHandler.ReadPointer(
+                proc, scene_node + o.m_modelState + BONE_ARRAY_OFF)
+            if not bone_matrix:
+                continue
+
+            origin = memfuncs.ProcMemHandler.ReadVec(proc, pawn + o.m_vOldOrigin)
+            if origin is None:
+                continue
+
+            dist = calculations.distance_vec3(origin, local_origin)
+            if dist < MIN_TARGET_DIST:
+                continue
+
+            # Bulk-кости: и head, и скелет, и кость-крепление трейсера - одним чтением
+            head, bones, pelvis = _read_bones_bulk(proc, bone_matrix)
+            if head is None:
+                continue
+            if opt_skeleton and bones:
+                filtered = {}
+                for bname, wp in bones.items():
+                    if (abs(wp.x - origin.x) > 200 or abs(wp.y - origin.y) > 200
+                            or abs(wp.z - origin.z) > 200):
+                        continue
+                    filtered[bname] = wp
+                if len(filtered) >= 2:
+                    filtered["head"] = head
+                    bones = filtered
+                else:
+                    bones = None
+            elif not opt_skeleton:
+                bones = None
+
+            name = _get_player_name(proc, controller, o) if opt_name else None
+
+            visible = False
+            if opt_visible:
+                try:
+                    visible = is_visible_to_local(proc, pawn, offsets_obj, local_index)
+                except Exception:
+                    visible = False
+
+            out.append(CachedEntity(
+                team=team,
+                is_enemy=(team != local_team),
+                health=health,
+                origin=origin,
+                head=head,
+                bones=bones,
+                pelvis=pelvis,
+                name=name,
+                visible=visible,
+                dist=dist,
+            ))
+        except Exception:
+            continue
+    return out
+
+
+def _reader_loop():
+    global _snapshot
+    while True:
+        st = _reader_state
+        if st["proc"] is None or not st["client"] or st["offsets"] is None:
+            time.sleep(0.02)
+            continue
+        try:
+            snap = _scan_once(st)
+        except Exception:
+            snap = None
+        if snap is not None:
+            with _snap_lock:
+                _snapshot = snap
+        time.sleep(0.001)
+
+
+def _ensure_reader():
+    global _reader_thread
+    if _reader_thread is None or not _reader_thread.is_alive():
+        _reader_thread = threading.Thread(target=_reader_loop, daemon=True)
+        _reader_thread.start()
+
+
 _spec_cache = []
 _spec_last_read = 0.0
-_ns_t0 = 0.0
 
 
 def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombState, SharedRuntime=None):
-    global _spec_cache, _spec_last_read, _ns_t0
+    global _spec_cache, _spec_last_read
+
+    _ensure_reader()
 
     if not _neron_has_focus():
         try:
@@ -120,14 +406,14 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
             pass
         return
 
-    try:
-        local_pawn = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerPawn)
-        local_controller = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwLocalPlayerController)
-        local_team = memfuncs.ProcMemHandler.ReadInt(processHandle, local_pawn + Offsets.offset.m_iTeamNum)
-        local_origin = memfuncs.ProcMemHandler.ReadVec(processHandle, local_pawn + Offsets.offset.m_vOldOrigin)
-        EntityList = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwEntityList)
-    except Exception:
-        EntityList = None
+    # Обновляем состояние для ридера; смена процесса - сброс кэша имён.
+    if (_reader_state["proc"] is not processHandle
+            or _reader_state["client"] != clientBaseAddress):
+        _reader_state["proc"] = processHandle
+        _reader_state["client"] = clientBaseAddress
+        _reader_state["offsets"] = Offsets
+        _name_cache.clear()
+    _reader_state["opts"] = Options
 
     opt_box = Options.get("EnableESPBoxRendering", False)
     opt_name = Options.get("EnableESPNameText", False)
@@ -136,121 +422,36 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     opt_health_bar = Options.get("EnableESPHealthBarRendering", False)
     opt_tracer = Options.get("EnableESPTracerRendering", False)
     opt_skeleton = Options.get("EnableESPSkeletonRendering", False)
-    opt_team_check = Options.get("EnableESPTeamCheck", False)
     opt_visible_box = Options.get("ESP_VisibleCheckBox", False)
 
     if not bool(Options.get("EnableESP", True)):
         opt_box = opt_name = opt_distance = opt_health_text = False
-        opt_health_bar = opt_tracer = opt_skeleton = opt_visible_box = opt_team_check = False
+        opt_health_bar = opt_tracer = opt_skeleton = opt_visible_box = False
 
-    render_required = any((opt_box, opt_name, opt_distance, opt_health_text, opt_health_bar, opt_tracer, opt_skeleton))
+    sync_skel = bool(Options.get("ESP_HealthSyncSkeleton", True))
+    sync_bar = bool(Options.get("ESP_HealthSyncBar", True))
+    skel_scale = float(Options.get("ESP_SkeletonThicknessScale", 1.0) or 1.0)
+    box_scale = float(Options.get("ESP_BoxThicknessScale", 1.0) or 1.0)
+    bar_scale = float(Options.get("ESP_HealthBarThicknessScale", 1.0) or 1.0)
 
-    ct_color = Options.get("CT_color", "#4DA2FF")
-    t_color = Options.get("T_color", "#FF6A5A")
-    ct_col = resolve_color(ct_color)
-    t_col = resolve_color(t_color)
+    # Цвета: базовая окраска по отношению к локальному игроку + кастомы
+    enemy_col = _col(Options.get("Enemy_color", "#FF6A5A"))
+    teammate_col = _col(Options.get("Teammate_color", "#4DA2FF"))
+    box_custom = bool(Options.get("EnableBoxCustomColor", False))
+    box_custom_col = _col(Options.get("Box_color", "#FF6A5A"))
+    tracer_custom = bool(Options.get("EnableTracerCustomColor", False))
+    tracer_custom_col = _col(Options.get("Tracer_color", "#FFD24D"))
+    hpbar_custom = bool(Options.get("EnableHPBarCustomColor", False))
+    hpbar_custom_col = _col(Options.get("HPBar_color", "#FF6A5A"))
 
-    _scanned_cache.clear()
-    local_index = 0
+    try:
+        tracer_thick = float(Options.get("ESP_TracerThickness", 1.5) or 1.5)
+    except Exception:
+        tracer_thick = 1.5
+    tracer_thick = max(0.5, min(4.0, tracer_thick))
 
-    if EntityList and render_required:
-        local_index = resolve_local_index(processHandle, EntityList, local_controller)
-
-        for i in range(64):
-            list_entry = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
-            if not list_entry:
-                continue
-
-            controller = memfuncs.ProcMemHandler.ReadPointer(processHandle, list_entry + 112 * (i & 0x1FF))
-            if not controller or controller == local_controller:
-                continue
-
-            pawnHandle = memfuncs.ProcMemHandler.ReadInt(processHandle, controller + Offsets.offset.m_hPlayerPawn)
-            if not pawnHandle:
-                continue
-
-            list_entry2 = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + 0x8 * ((pawnHandle & 0x7FFF) >> 9) + 0x10)
-            if not list_entry2:
-                continue
-
-            pawn = memfuncs.ProcMemHandler.ReadPointer(processHandle, list_entry2 + 0x70 * (pawnHandle & 0x1FF))
-            if not pawn or pawn == local_pawn:
-                continue
-
-            health = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_iHealth)
-            if health <= 0:
-                continue
-
-            team = memfuncs.ProcMemHandler.ReadInt(processHandle, controller + Offsets.offset.m_iTeamNum)
-            lifeState = memfuncs.ProcMemHandler.ReadInt(processHandle, pawn + Offsets.offset.m_lifeState)
-            if lifeState != 256 or (opt_team_check and team == local_team):
-                continue
-
-            sceneNode = memfuncs.ProcMemHandler.ReadPointer(processHandle, pawn + Offsets.offset.m_pGameSceneNode)
-            if not sceneNode:
-                continue
-
-            boneMatrix = memfuncs.ProcMemHandler.ReadPointer(processHandle, sceneNode + Offsets.offset.m_modelState + 0x80)
-            if not boneMatrix:
-                continue
-
-            origin = memfuncs.ProcMemHandler.ReadVec(processHandle, pawn + Offsets.offset.m_vOldOrigin)
-            if origin is None:
-                continue
-
-            head = _calc_head_center(processHandle, boneMatrix)
-
-            if calculations.distance_vec3(origin, local_origin) < 35:
-                continue
-
-            bones_world = None
-            if opt_skeleton:
-                bones_world = {}
-                for bone_name, bone_index in PLAYER_BONES.items():
-                    if bone_name == "eye_L" or bone_name == "eye_R":
-                        continue
-
-                    wp = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + bone_index * 32)
-                    if wp is None:
-                        continue
-
-                    if abs(wp.x - origin.x) > 200 or abs(wp.y - origin.y) > 200 or abs(wp.z - origin.z) > 200:
-                        continue
-
-                    bones_world[bone_name] = wp
-
-                if len(bones_world) < 2:
-                    bones_world = None
-                else:
-                    bones_world["head"] = head
-
-            name = None
-            if opt_name:
-                addr = memfuncs.ProcMemHandler.ReadPointer(processHandle, controller + Offsets.offset.m_sSanitizedPlayerName)
-                if addr:
-                    try:
-                        name = memfuncs.ProcMemHandler.ReadString(processHandle, addr, 64)
-                    except Exception:
-                        name = "?"
-                else:
-                    name = "?"
-
-            visible = False
-            if opt_visible_box:
-                try:
-                    visible = is_visible_to_local(processHandle, pawn, Offsets, local_index)
-                except Exception:
-                    visible = False
-
-            _scanned_cache.append(CachedEntity(
-                team=team,
-                health=health,
-                origin=origin,
-                head=head,
-                bones=bones_world,
-                name=name,
-                visible=visible
-            ))
+    with _snap_lock:
+        ents = _snapshot
 
     try:
         pme.begin_drawing()
@@ -270,10 +471,9 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
             except Exception:
                 _spec_cache = []
 
-        specs_snapshot = _spec_cache
         spectator.render_spectator_block(
             pme,
-            specs_snapshot,
+            _spec_cache,
             enabled=Options.get("EnableShowSpectators", True),
             screen_size=(globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT),
             font_path=font_path,
@@ -284,15 +484,21 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         pass
 
+    # ===== NoScope-оверлей (крест при снятом скопе): ТОЛЬКО рисование =====
+    # Снятие скопа - целиком в fovchanger. zoomed: m_bIsScoped ИЛИ 0<FOV<89.
     try:
         if bool(Options.get("EnableNoScopeOverlay", False)):
             off = Offsets.offset
             o_sc = getattr(off, "m_bIsScoped", 0)
-            lp = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + off.dwLocalPlayerPawn)
+            zoomed = False
+            lp = 0
+            try:
+                lp = memfuncs.ProcMemHandler.ReadPointer(
+                    processHandle, clientBaseAddress + off.dwLocalPlayerPawn)
+            except Exception:
+                lp = 0
 
             if lp:
-                zoomed = False
-
                 if o_sc:
                     try:
                         zoomed = memfuncs.ProcMemHandler.ReadInt(processHandle, lp + o_sc) == 1
@@ -309,32 +515,27 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
                     except Exception:
                         pass
 
-                if zoomed:
-                    if _ns_t0 == 0.0:
-                        _ns_t0 = time.time()
+            if zoomed:
+                sw2, sh2 = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
+                col = _col("#000000")
+                pme.draw_line(sw2 // 2, 0, sw2 // 2, sh2, color=col, thick=1.0)
+                pme.draw_line(0, sh2 // 2, sw2, sh2 // 2, color=col, thick=1.0)
+    except Exception:
+        pass
 
-                    if (time.time() - _ns_t0) >= 0.25 and o_sc:
-                        try:
-                            memfuncs.ProcMemHandler.WriteInt(processHandle, lp + o_sc, 0)
-                        except Exception:
-                            pass
-
-                    sw2, sh2 = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
-                    col = resolve_color("#000000")
-
-                    pme.draw_line(sw2 // 2, 0, sw2 // 2, sh2, color=col, thick=1.0)
-                    pme.draw_line(0, sh2 // 2, sw2, sh2 // 2, color=col, thick=1.0)
-                else:
-                    _ns_t0 = 0.0
+    # Точка ноускопа: вся логика в features/noscopedot.py
+    try:
+        noscopedot.draw(processHandle, clientBaseAddress, Offsets, Options, pme)
     except Exception:
         pass
 
     try:
-        viewMatrix = memfuncs.ProcMemHandler.ReadMatrix(processHandle, clientBaseAddress + Offsets.offset.dwViewMatrix)
+        view_matrix = memfuncs.ProcMemHandler.ReadMatrix(
+            processHandle, clientBaseAddress + Offsets.offset.dwViewMatrix)
     except Exception:
-        viewMatrix = None
+        view_matrix = None
 
-    if viewMatrix is None:
+    if view_matrix is None:
         try:
             pme.end_drawing()
         except Exception:
@@ -347,20 +548,37 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         if bool(Options.get("EnableNoSmoke", False)) and SharedRuntime is not None:
             smokes_snapshot = getattr(SharedRuntime, "smokes", None)
             if smokes_snapshot:
-                from features import nosmoke as _ns_mod
-                _ns_mod.render_smoke_markers(pme, processHandle, clientBaseAddress, Offsets.offset, list(smokes_snapshot), screen_w, screen_h)
+                _ns_mod.render_smoke_markers(
+                    pme, processHandle, clientBaseAddress, Offsets.offset,
+                    list(smokes_snapshot), screen_w, screen_h)
     except Exception:
         pass
 
-    for ent in _scanned_cache:
+    for ent in ents:
         try:
             origin = ent.origin
             head = ent.head
 
-            sh = calculations.world_to_screen(viewMatrix, head)
-            sf = calculations.world_to_screen(viewMatrix, origin)
-            bt = calculations.world_to_screen(viewMatrix, Vector3(origin.x, origin.y, origin.z + 70))
+            sh = calculations.world_to_screen(view_matrix, head)
+            sf = calculations.world_to_screen(view_matrix, origin)
+            bt = calculations.world_to_screen(
+                view_matrix, Vector3(origin.x, origin.y, origin.z + BOX_TOP_OFFSET))
 
+            # Базовая окраска: противник/тиммейт (не T/CT)
+            color_team = enemy_col if ent.is_enemy else teammate_col
+
+            # Трейсер ДО гейт-проверок границ: линия живёт и у заэкранных
+            # противников. Крепление - кость 0 (таз).
+            if opt_tracer:
+                tracer_w = ent.pelvis if ent.pelvis is not None else origin
+                tp = calculations.world_to_screen(view_matrix, tracer_w)
+                if tp is not None:
+                    tcol = tracer_custom_col if tracer_custom else color_team
+                    pme.draw_line(screen_w // 2, screen_h, tp.x, tp.y,
+                                  color=tcol, thick=tracer_thick)
+
+            if sh is None or sf is None or bt is None:
+                continue
             if sh.x <= -1 or sf.y <= -1 or sh.x >= screen_w or sh.y >= screen_h:
                 continue
 
@@ -369,80 +587,87 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
             rect_top = bt.y
             rect_w = box_h / 2
             rect_h = box_h
-            rect_cx = rect_left + rect_w / 2
-            rect_cy = rect_top + rect_h / 2
             rect_right = rect_left + rect_w
 
             info_x = rect_right + 12
             info_y = rect_top + 4
 
-            team = ent.team
-            health = ent.health
-            color_team = t_col if team == 2 else ct_col
-
+            # Белая окраска невидимых - только для командного варианта:
+            # явно заданный "свой цвет" бокса сильнее.
             if opt_visible_box and not ent.visible:
-                color_team = resolve_color("#FFFFFF")
+                color_team = _col("#FFFFFF")
 
-            health_hex = health_color_hex(int(health))
-            health_col = resolve_color(health_hex)
-
-            sync_skel = bool(Options.get("ESP_HealthSyncSkeleton", True))
-            sync_bar = bool(Options.get("ESP_HealthSyncBar", True))
-            skel_scale = float(Options.get("ESP_SkeletonThicknessScale", 1.0) or 1.0)
-            box_scale = float(Options.get("ESP_BoxThicknessScale", 1.0) or 1.0)
-            bar_scale = float(Options.get("ESP_HealthBarThicknessScale", 1.0) or 1.0)
+            hp_int = int(ent.health)
+            health_col = _health_col(hp_int)
+            hp_hex = _health_hex(hp_int)
 
             if opt_box:
-                draw_box(pme, rect_left, rect_top, rect_w, rect_h, color=color_team, thickness_scale=box_scale)
+                draw_box(rect_left, rect_top, rect_w, rect_h,
+                         color=(box_custom_col if box_custom else color_team),
+                         thickness_scale=box_scale)
 
             info_cursor = info_y
 
             if opt_name and ent.name:
-                draw_name(pme, ent.name.strip(), info_x, info_cursor, color="#E8F1FF")
+                draw_name(ent.name.strip(), info_x, info_cursor, color="#E8F1FF")
                 info_cursor += 14
 
             if opt_distance:
-                dist2d = calculations.distance_vec3(origin, local_origin)
-                draw_distance(pme, info_x, info_cursor, dist2d, color="#A4B0C3")
+                draw_distance(info_x, info_cursor, ent.dist, color="#A4B0C3")
                 info_cursor += 14
 
             if opt_health_text:
-                draw_health_text(pme, info_x, info_cursor, health, color="#82FFAE")
+                draw_health_text(info_x, info_cursor, ent.health, color="#82FFAE")
 
             if opt_health_bar:
-                draw_health_bar(pme, health, rect_left, rect_top, rect_h, thickness_scale=bar_scale, use_health_color=sync_bar, team_color=color_team, color_from_hex=health_hex)
-
-            if opt_tracer:
-                pme.draw_line(screen_w // 2, screen_h, rect_cx, rect_cy, color=color_team, thick=1.5)
+                # Иерархия: sync_bar (по HP) > свой цвет > командная окраска
+                bar_team = hpbar_custom_col if (hpbar_custom and not sync_bar) else color_team
+                draw_health_bar(ent.health, rect_left, rect_top, rect_h,
+                                thickness_scale=bar_scale, use_health_color=sync_bar,
+                                team_color=bar_team,
+                                color_from_hex=hp_hex)
 
             if opt_skeleton and ent.bones:
-                bones2d = {bn: calculations.world_to_screen(viewMatrix, wp) for bn, wp in ent.bones.items()}
+                bones2d = {}
+                for bn, wp in ent.bones.items():
+                    b2d = calculations.world_to_screen(view_matrix, wp)
+                    if b2d is None:
+                        continue
+                    bones2d[bn] = b2d
+                if not bones2d:
+                    continue
                 sk_thick = max(0.9, min(1.8, rect_h * 0.012)) * skel_scale
                 sk_radius = int(max(1.0, min(3.0, rect_h * 0.02)))
                 skel_col = health_col if sync_skel else color_team
-                draw_skeleton(pme, bones2d, boneConnections, color=skel_col, thickness=sk_thick, joint_radius=sk_radius)
+                draw_skeleton(bones2d, boneConnections, color=skel_col,
+                              thickness=sk_thick, joint_radius=sk_radius)
 
                 if "head" in bones2d:
                     hp2d = bones2d["head"]
                     if hp2d.x >= 0 and hp2d.y >= 0:
                         head_r = max(2.0, rect_h * 0.085)
                         hw = head_r * 0.75
-                        pts = [(hp2d.x + cx * hw, hp2d.y + cy * head_r) for (cx, cy) in _ELLIPSE_UNIT]
+                        pts = [(hp2d.x + cx * hw, hp2d.y + cy * head_r)
+                               for (cx, cy) in _ELLIPSE_UNIT]
                         for k in range(_ELLIPSE_STEPS):
                             a = pts[k]
                             b = pts[(k + 1) % _ELLIPSE_STEPS]
-                            pme.draw_line(a[0], a[1], b[0], b[1], color=skel_col, thick=sk_thick)
+                            pme.draw_line(a[0], a[1], b[0], b[1],
+                                          color=skel_col, thick=sk_thick)
         except Exception:
             continue
 
     try:
         if Options.get("EnableESPBombTimer", False) and SharedBombState is not None:
-            planted = getattr(SharedBombState, "bombPlanted", False)
-            time_left = getattr(SharedBombState, "bombTimeLeft", -1)
-            total_time = getattr(SharedBombState, "bombTimeTotal", 40)
-
-            from .draw import draw_bomb_status_card
-            draw_bomb_status_card(pme, planted=planted, time_left=time_left, total_time=total_time or 40)
+            draw_bomb_status_card(
+                planted=getattr(SharedBombState, "bombPlanted", False),
+                time_left=getattr(SharedBombState, "bombTimeLeft", -1),
+                total_time=getattr(SharedBombState, "bombTimeTotal", 40) or 40,
+                defusing=bool(getattr(SharedBombState, "bombBeingDefused", False)),
+                defuse_left=getattr(SharedBombState, "bombDefuseLeft", None),
+                defuse_total=getattr(SharedBombState, "bombDefuseTotal", None),
+                defuse_impossible=bool(getattr(SharedBombState, "bombDefuseImpossible", False)),
+            )
     except Exception:
         pass
 
@@ -450,3 +675,4 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         pme.end_drawing()
     except Exception:
         pass
+# markers: END features/esp/core.py v5.1

@@ -1,0 +1,254 @@
+import os
+import json
+import time
+
+import globals
+from functions import memfuncs
+
+try:
+    from features.esp.colors import resolve_color
+except Exception:
+    resolve_color = None
+
+# Definition index'ы снайперских винтовок
+SNIPER_ITEM_IDS = frozenset({9, 40, 38, 11})   # AWP, SSG08, SCAR-20, G3SG1
+
+# Границы клампа настроек (слайдеры в GUI имеют те же диапазоны)
+RADIUS_MIN, RADIUS_MAX = 1.0, 12.0
+OPACITY_MIN, OPACITY_MAX = 10, 100
+
+# ==================== Структурные константы entity-листа ====================
+ENT_BUCKET_STEP = 0x8
+ENT_IDENTITY = 0x10
+ENT_STRIDE = 112
+HANDLE_SER_MASK = 0x7FFF
+HANDLE_IDX_MASK = 0x1FF
+
+# Поля схемы: каждое ИЗ СВОЕГО КЛАССА
+_SCHEMA_NEEDS = (
+    ("C_BasePlayerPawn", "m_pWeaponServices"),
+    ("CPlayer_WeaponServices", "m_hActiveWeapon"),
+    ("C_EconEntity", "m_AttributeManager"),
+    ("C_AttributeContainer", "m_Item"),
+    ("C_EconItemView", "m_iItemDefinitionIndex"),
+    ("C_CSWeaponBaseGun", "m_zoomLevel"),
+)
+
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+_schema = None
+_col_cache = {}
+_wpn_cache = {"h": -1, "idx": -1, "zl": -1}
+_hb_ts = 0.0
+_hb_count = 0
+_drawn_once = False
+
+
+def _get_schema():
+    """Словарь поле -> оффсет, каждое поле из своего класса. Один раз
+    за жизнь процесса."""
+    global _schema
+    if _schema is not None:
+        return _schema
+    data = {}
+    try:
+        with open(os.path.join(_REPO, "output", "client_dll.json"), "r", encoding="utf-8") as f:
+            jd = json.load(f)
+        classes = jd.get("client.dll", {}).get("classes", {})
+        for cname, fname in _SCHEMA_NEEDS:
+            cdata = classes.get(cname)
+            if not cdata:
+                continue
+            val = (cdata.get("fields") or {}).get(fname)
+            if val is not None:
+                data[fname] = int(val)
+    except Exception:
+        pass
+    _schema = data
+    return data
+
+
+def _dot_color(hexstr):
+    """Цвет точки: resolve_color - путь всего рендера проекта. Кэш по
+    входной строке."""
+    c = _col_cache.get(hexstr)
+    if c is not None:
+        return c
+    try:
+        h = (hexstr or "FFFFFF").lstrip("#").strip()
+        h = h[:6].upper() if len(h) >= 6 else "FFFFFF"
+    except Exception:
+        h = "FFFFFF"
+    result = "#" + h
+    if resolve_color is not None:
+        try:
+            result = resolve_color("#" + h)
+        except Exception:
+            result = "#" + h
+    _col_cache[hexstr] = result
+    return result
+
+
+def _dot_params(Options):
+    """(radius_px, opacity_01) из настроек с клампом."""
+    try:
+        radius = float(Options.get("NoScopeDot_radius", 5.0))
+    except Exception:
+        radius = 5.0
+    radius = max(RADIUS_MIN, min(RADIUS_MAX, radius))
+    try:
+        opacity = int(Options.get("NoScopeDot_opacity", 80))
+    except Exception:
+        opacity = 80
+    opacity = max(OPACITY_MIN, min(OPACITY_MAX, opacity)) / 100.0
+    return (radius, opacity)
+
+
+def _weapon_index(proc, client_base, local_pawn, o, sch):
+    """(idx, zl) активного оружия. ent по handle-пути (конвенция
+    ESP-сканера), индекс - uint16 по каноничной вложенной композиции
+    (ent + AM + Item + idx). uint16 ОБЯЗАТЕЛЬНО: int32 затягивает
+    соседнее m_iEntityQuality в старшую половину (0x40000-мусор).
+    Кэш по handle."""
+    ws_off = sch.get("m_pWeaponServices", 0)
+    aw_off = sch.get("m_hActiveWeapon", 0)
+    am_off = sch.get("m_AttributeManager", 0)
+    item_off = sch.get("m_Item", 0)
+    idx_off = sch.get("m_iItemDefinitionIndex", 0)
+    zl_off = sch.get("m_zoomLevel", 0)
+    if not (ws_off and aw_off and am_off and item_off and idx_off):
+        return None
+    try:
+        ws = memfuncs.ProcMemHandler.ReadPointer(proc, local_pawn + ws_off)
+        if not ws:
+            return None
+        try:
+            handle = int(memfuncs.ProcMemHandler.ReadUInt(proc, ws + aw_off))
+        except Exception:
+            handle = int(memfuncs.ProcMemHandler.ReadInt(proc, ws + aw_off)) & 0xFFFFFFFF
+        if handle and handle == _wpn_cache["h"]:
+            return (_wpn_cache["idx"], _wpn_cache["zl"])
+        if not handle:
+            # Нет оружия (смерть/межраунд) - кэш сбрасываем
+            _wpn_cache.update(h=-1, idx=-1, zl=-1)
+            return None
+        index = handle & HANDLE_SER_MASK
+        el = memfuncs.ProcMemHandler.ReadPointer(proc, client_base + o.dwEntityList)
+        if not el:
+            return None
+        le = memfuncs.ProcMemHandler.ReadPointer(
+            proc, el + ENT_BUCKET_STEP * (index >> 9) + ENT_IDENTITY)
+        if not le:
+            return None
+        ent = memfuncs.ProcMemHandler.ReadPointer(
+            proc, le + ENT_STRIDE * (index & HANDLE_IDX_MASK))
+        if not ent:
+            return None
+        # Индекс: uint16 по вложенной композиции атрибутов (калибровка)
+        widx = int(memfuncs.ProcMemHandler.ReadUShort(proc, ent + am_off + item_off + idx_off))
+        zl = -1
+        if zl_off:
+            try:
+                zl = int(memfuncs.ProcMemHandler.ReadInt(proc, ent + zl_off))
+            except Exception:
+                pass
+        _wpn_cache.update(h=handle, idx=widx, zl=zl)
+        return (widx, zl)
+    except Exception:
+        return None
+
+
+def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
+    """Точка ноускопа. Вызывается из ESP_Update внутри begin/end drawing."""
+    global _hb_ts, _hb_count, _drawn_once
+    try:
+        opt_dot = bool(Options.get("EnableNoScopeDot", False))
+        if not opt_dot:
+            return
+        o = Offsets.offset
+
+        # Локальный павн
+        lp = 0
+        try:
+            lp = memfuncs.ProcMemHandler.ReadPointer(
+                processHandle, clientBaseAddress + o.dwLocalPlayerPawn)
+        except Exception:
+            pass
+
+        # Зум: m_bIsScoped ИЛИ 0<FOV<89 (fovchanger пишет m_bIsScoped=0
+        # в зуме при "Убрать чёрный скоуп" - FOV-чек обязателен)
+        zoomed = False
+        if lp:
+            try:
+                zoomed = memfuncs.ProcMemHandler.ReadInt(
+                    processHandle, lp + o.m_bIsScoped) == 1
+            except Exception:
+                pass
+            if not zoomed:
+                try:
+                    cam = memfuncs.ProcMemHandler.ReadPointer(
+                        processHandle, lp + o.m_pCameraServices)
+                    if cam:
+                        cf = memfuncs.ProcMemHandler.ReadInt(processHandle, cam + o.m_iFOV)
+                        if 0 < cf < 89:
+                            zoomed = True
+                except Exception:
+                    pass
+
+        # Жив? (байт, 0 = жив)
+        alive = False
+        if lp:
+            try:
+                alive = int(memfuncs.ProcMemHandler.ReadBytes(
+                    processHandle, lp + o.m_lifeState, 1)[0]) == 0
+            except Exception:
+                pass
+
+        hb_extra = ""
+        widx = -1
+        if lp and not zoomed and alive:
+            sch = _get_schema()
+            missing = [f for (_c, f) in _SCHEMA_NEEDS if not sch.get(f)]
+            if missing:
+                hb_extra = " missing=" + ",".join(missing)
+            else:
+                res = _weapon_index(processHandle, clientBaseAddress, lp, o, sch)
+                if res is None:
+                    hb_extra = " step=no-ent"
+                else:
+                    widx, zl = res
+                    hb_extra = f" idx={widx} zl={zl}"
+
+        if widx in SNIPER_ITEM_IDS:
+            radius, opacity = _dot_params(Options)
+            base = _dot_color(Options.get("NoScopeDot_color", "#FFFFFF"))
+            try:
+                col = pme.fade_color(base, opacity)
+            except Exception:
+                col = base
+            pme.draw_circle(
+                int(globals.SCREEN_WIDTH // 2),
+                int(globals.SCREEN_HEIGHT // 2),
+                int(round(radius)),
+                color=col)
+            if not _drawn_once:
+                _drawn_once = True
+                print("[noscopedot] точка активна, диагностика выключена", flush=True)
+
+        # Диагностика: только пока точка ни разу не нарисована, максимум
+        # 12 строк за сессию - дальше молчит в любом случае.
+        if not _drawn_once and _hb_count < 12:
+            now = time.time()
+            if now - _hb_ts >= 5.0:
+                _hb_ts = now
+                _hb_count += 1
+                print(f"[noscopedot][hb] lp={bool(lp)} zoomed={zoomed} "
+                      f"alive={alive}{hb_extra}", flush=True)
+                if _hb_count >= 12:
+                    print("[noscopedot] диагностика исчерпана; если точки нет - "
+                          "пришли эти 12 строк", flush=True)
+    except Exception as e:
+        try:
+            print(f"[noscopedot][exc] {repr(e)}", flush=True)
+        except Exception:
+            pass

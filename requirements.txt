@@ -6,3 +6,4 @@ pyserial==3.5
 pywin32>=310
 requests==2.32.5
 pillow
+comtypes

@@ -3,9 +3,17 @@ from functions import logutil
 from functions.process_watcher import ProcessConnector
 import time
 
-# Максимальная яркость вспышки: 255 = как обычно, 0 = вспышка не видна
+# Максимальная яркость вспышки: 255 = как обычно, 0 = вспышка не видна.
+# Игровые константы, не оффсеты.
 FLASH_ALPHA_NORMAL = 255.0
 FLASH_ALPHA_BLOCKED = 0.0
+
+# Период основного цикла: 5 мс = 200 Гц. Игра каждый тик (64 Гц) пытается
+# вернуть 255, поэтому держать 0 нужно чаще тика.
+LOOP_SLEEP = 0.005
+# Пауза, когда антифлеш выключен и яркость уже нормализована: нет смысла
+# 200 раз в секунду читать павн ради "ничего не делать"
+IDLE_SLEEP = 0.05
 
 
 def AntiFlashThreadFunction(Options, Offsets):
@@ -20,6 +28,11 @@ def AntiFlashThreadFunction(Options, Offsets):
 
             enabled = bool(Options.get("EnableAntiFlashbang", False))
 
+            # Быстрый путь: выключено и нормализовано - спим дольше без чтений памяти
+            if not enabled and last_enabled is False:
+                time.sleep(IDLE_SLEEP)
+                continue
+
             local_pawn = memfuncs.ProcMemHandler.ReadPointer(
                 process, client + Offsets.offset.dwLocalPlayerPawn
             )
@@ -30,24 +43,38 @@ def AntiFlashThreadFunction(Options, Offsets):
 
             addr = local_pawn + Offsets.offset.m_flFlashMaxAlpha
 
+            # Перепроверка павна ПЕРЕД записью: между чтением и записью павн
+            # может освободиться (смерть/загрузка карты/конец матча), запись
+            # тогда попадает в переиспользованную память. Та же страховка,
+            # что в fovchanger/bhop.
+            def _pawn_alive():
+                try:
+                    return memfuncs.ProcMemHandler.ReadPointer(
+                        process, client + Offsets.offset.dwLocalPlayerPawn
+                    ) == local_pawn
+                except Exception:
+                    return False
+
             if enabled:
                 # Постоянно держим 0: игра каждый тик пытается вернуть 255,
-                # поэтому разовая запись (как было раньше) не работала.
-                try:
-                    memfuncs.ProcMemHandler.WriteFloat(process, addr, FLASH_ALPHA_BLOCKED)
-                except Exception:
-                    pass
+                # поэтому разовая запись не работает.
+                if _pawn_alive():
+                    try:
+                        memfuncs.ProcMemHandler.WriteFloat(process, addr, FLASH_ALPHA_BLOCKED)
+                    except Exception:
+                        pass
                 last_enabled = True
             else:
                 # После выключения один раз возвращаем нормальную яркость
                 if last_enabled is not False:
-                    try:
-                        memfuncs.ProcMemHandler.WriteFloat(process, addr, FLASH_ALPHA_NORMAL)
-                    except Exception:
-                        pass
-                last_enabled = False
+                    if _pawn_alive():
+                        try:
+                            memfuncs.ProcMemHandler.WriteFloat(process, addr, FLASH_ALPHA_NORMAL)
+                        except Exception:
+                            pass
+                    last_enabled = False
 
-            time.sleep(0.005)
+            time.sleep(LOOP_SLEEP)
 
         except Exception as exc:
             logutil.debug(f"[antiflash] loop exception: {exc}")
