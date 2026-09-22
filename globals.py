@@ -16,10 +16,6 @@ GAME_OFFSETS = offsets.get_offsets()
 SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 # ==================== Дефолтные настройки ====================
-# Клавиши тогглов (ToggleKey_<фича>) в дефолтах НЕ перечислены:
-# генерируются в main.py из functions/toggle_registry.TOGGLE_FEATURES
-# перед LoadConfig.
-#
 # Иерархия цветов рендера (features/esp/core.py):
 #   Box:     EnableBoxCustomColor -> Box_color; иначе team (visible-white);
 #   Tracer:  EnableTracerCustomColor -> Tracer_color; иначе team;
@@ -56,6 +52,7 @@ CHEAT_SETTINGS = {
     "EnableESPBoxRendering": False,
     "EnableESPTracerRendering": False,
     "EnableESPNameText": False,
+    "EnableESPWeaponText": False,
     "EnableESPHealthBarRendering": True,
     "EnableESPHealthText": False,
     "EnableESPDistanceText": False,

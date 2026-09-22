@@ -1,4 +1,7 @@
 import struct
+import ctypes
+import threading
+
 import pymem
 from pymem.process import module_from_name
 from ext.datatypes import *
@@ -15,14 +18,55 @@ def GetModuleBase(modulename: str, process_object: pymem.Pymem):
         return module.lpBaseOfDll
     return None
 
+# ==================== Быстрый слой чтения ====================
+# Прямой ReadProcessMemory вместо pymem-обвязки: чтение - самое горячее
+# место (ESP-сканер, триггер, аим). Семантика: при СБОЕ RPM буфер
+# ОБНУЛЯЕТСЯ (ноль вместо ошибки, исключения нет) - верхние уровни
+# валидируют значения valid_ptr/falsy-чеками. Буферы переиспользуются
+# (thread-local, рендер и ридер ESP живут в одном процессе и не дерутся
+# за буфер), lookup kernel32 и argtypes настраиваются один раз.
+# Обнуление только в ветке сбоя: быстрый путь не платит memset.
+_k32 = ctypes.windll.kernel32
+_RPM = _k32.ReadProcessMemory
+_RPM.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                 ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))
+_RPM.restype = ctypes.c_int
+
+_tls = threading.local()
+
+
+def _tbuf(size):
+    """Переиспользуемый буфер на поток. ВАЖНО: валиден только до следующего
+    _tbuf того же размера в этом потоке - наружу не возвращать (ReadBytes
+    отдаёт копию .raw)."""
+    bufs = getattr(_tls, "bufs", None)
+    if bufs is None:
+        bufs = _tls.bufs = {}
+    buf = bufs.get(size)
+    if buf is None:
+        buf = ctypes.create_string_buffer(size)
+        bufs[size] = buf
+    return buf
+
+
+def _rpm_buf(handle, address, size):
+    buf = _tbuf(size)
+    # 0 = полный сбой чтения (частичное чтение через границу недоступной
+    # страницы по MSDN тоже фейл). Без проверки буфер держал бы СТАРЫЕ
+    # данные прошлого чтения - "призраки" вместо нулей.
+    if not _RPM(handle, address, buf, size, None):
+        ctypes.memset(buf, 0, size)
+    return buf
+
+
 class ProcMemHandler:
     @staticmethod
     def ReadPointer(proc, address):
-        return proc.read_longlong(address)
+        return struct.unpack_from('<q', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadBytes(proc, address, bytes_count):
-        return proc.read_bytes(address, bytes_count)
+        return _rpm_buf(proc.process_handle, address, bytes_count).raw
 
     @staticmethod
     def WriteBytes(proc, address, newbytes):
@@ -30,48 +74,45 @@ class ProcMemHandler:
 
     @staticmethod
     def ReadInt(proc, address):
-        return proc.read_int(address)
+        return struct.unpack_from('<i', _rpm_buf(proc.process_handle, address, 4), 0)[0]
 
     @staticmethod
     def ReadLong(proc, address):
-        return proc.read_longlong(address)
+        return struct.unpack_from('<q', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadFloat(proc, address):
-        return proc.read_float(address)
+        return struct.unpack_from('<f', _rpm_buf(proc.process_handle, address, 4), 0)[0]
 
     @staticmethod
     def ReadDouble(proc, address):
-        return proc.read_double(address)
+        return struct.unpack_from('<d', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadVec(proc, address):
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 12)
-        x, y, z = struct.unpack('fff', bytes_)
+        buf = _rpm_buf(proc.process_handle, address, 12)
+        x, y, z = struct.unpack_from('fff', buf, 0)
         return Vector3(x, y, z)
 
     @staticmethod
     def ReadShort(proc, address):
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 2)
-        return struct.unpack('h', bytes_)[0]
+        return struct.unpack_from('h', _rpm_buf(proc.process_handle, address, 2), 0)[0]
 
     @staticmethod
     def ReadUShort(proc, address):
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 2)
-        return struct.unpack('H', bytes_)[0]
+        return struct.unpack_from('H', _rpm_buf(proc.process_handle, address, 2), 0)[0]
 
     @staticmethod
     def ReadUInt(proc, address):
-        return proc.read_uint(address)
+        return struct.unpack_from('<I', _rpm_buf(proc.process_handle, address, 4), 0)[0]
 
     @staticmethod
     def ReadULong(proc, address):
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 8)
-        return struct.unpack('Q', bytes_)[0]
+        return struct.unpack_from('Q', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadBool(proc, address):
-        return proc.read_bool(address)
+        return struct.unpack_from('?', _rpm_buf(proc.process_handle, address, 1), 0)[0]
 
     @staticmethod
     def ReadString(proc, address, length):

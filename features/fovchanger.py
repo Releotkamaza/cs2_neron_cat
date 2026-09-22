@@ -1,5 +1,7 @@
+# markers: START features/fovchanger.py v10
 from functions import memfuncs
 from functions import logutil
+from features import noscopedot
 from functions.process_watcher import ProcessConnector
 import json
 import os
@@ -41,12 +43,37 @@ ZOOM_LOST_TIMEOUT = 0.80
 
 FOV_RATE_EPS = 0.001
 
+# ==================== Структурные константы entity-листа ====================
+# Единая конвенция проекта - та же, что в шапке features/noscopedot.py.
+# Используется ТОЛЬКО гейтом снайперок; оригинальный резолв zoom_level
+# (_entity_from_handle) не тронут - его судьба отдельный долг.
+ENT_BUCKET_STEP = 0x8      # шаг бакетов entity list
+ENT_IDENTITY = 0x10        # смещение CEntityIdentity в слоте
+ENT_STRIDE = 112           # stride слота (контроллеры и павны)
+HANDLE_SER_MASK = 0x7FFF   # серийно-индексные биты handle
+HANDLE_IDX_MASK = 0x1FF    # индекс внутри бакета
+
+# Границы валидности указателей (как в spectator/nosmoke)
+MASK64    = 0xFFFFFFFFFFFFFFFF
+USER_LOW  = 0x0000000000100000
+USER_HIGH = 0x00007FFFFFFFFFFF
+
+# Период локального кэша настроек: Options - Manager-прокси, цикл ~1 кГц,
+# чтения .get() на каждой итерации давали ~3000-4000 IPC/с (конвенция
+# "Manager-IPC в мс-циклах запрещён", триггер/антифлеш-прецедент).
+OPTS_REFRESH = 0.1
+
 # ==================== Оффсеты ====================
 # Ноль числовых констант. Ядро (dw*-оффсеты, m_pCameraServices, m_lifeState,
 # m_iFOV, m_bIsScoped) - из dataclass ext/offsets.py (он сам умеет фоллбек
 # на дамп/URL). Схемные поля и кнопка zoom - из output/*.json (cs2-dumper),
 # батник регенерит их при каждом запуске.
 # Чего в дампе нет - соответствующая под-фича отключается, никаких fallback-чисел.
+# ГЕЙТ СНАЙПЕРОК: снятие скоупа - только с AWP/SSG08/SCAR-20/G3SG1 в руках.
+# AUG/SG553 поднимают нативный скоуп (свой прицел) - снятие ломало их
+# визуал. Список индексов и схема композиции - единые источники из
+# features/noscopedot.py (SNIPER_ITEM_IDS, _get_schema()); плоская _SCHEMA
+# ниже для m_AttributeManager не годится (C_Chicken-ловушка).
 
 _json_cache = {}
 
@@ -163,7 +190,7 @@ def FovChangerThreadFunction(Options, Offsets):
     }
     _gone = [k for k, v in _schema_map.items() if not v]
     if _gone:
-        print("[fovchanger] деградация, нет в дамапе: " + ", ".join(_gone), flush=True)
+        print("[fovchanger] деградация, нет в дампе: " + ", ".join(_gone), flush=True)
 
     def _clamp(v, lo, hi):
         try:
@@ -171,9 +198,18 @@ def FovChangerThreadFunction(Options, Offsets):
         except Exception:
             return lo
 
+    # Локальный снимок настроек, 10 Гц. Единственный источник чтений
+    # в цикле (fov_enabled/noscope_enabled/desired_fov/FovDebug/NoScopeActive).
+    opts_cache = dict(Options.items())
+    opts_ts = time.time()
+
     def _set_noscope_active(v):
+        # Сравнение с кэшем вместо живого Options.get: воркер - единственный
+        # писатель этого ключа, запись происходит один раз на смену
+        # состояния; после собственной записи окно кэша (<= OPTS_REFRESH)
+        # может дать несколько избыточных записей - самогасится.
         try:
-            if bool(Options.get("NoScopeActive", False)) != v:
+            if bool(opts_cache.get("NoScopeActive", False)) != v:
                 Options["NoScopeActive"] = v
         except Exception:
             pass
@@ -256,7 +292,16 @@ def FovChangerThreadFunction(Options, Offsets):
                 proc,
                 list_entry + 0x78 * (index & 0x1FF)
             )
-            return int(entity or 0)
+            # Валидность обязательна (канон spectator/nosmoke). Резолв здесь
+            # известен как мёртвый (0x1FFF/0x78 - долг): без проверки мусорный
+            # указатель доходил до ReadInt(zl), а с memfuncs v2.1 (сбой -> 0)
+            # мусор превращался в "легальный" zoom_level=0 и разблокировал
+            # unstick-ветку, которая спала весь рантайм. Гейт возвращает
+            # пути историческое поведение: мусор -> 0 -> zoom_level = -1.
+            entity = int(entity or 0) & MASK64
+            if USER_LOW <= entity <= USER_HIGH:
+                return entity
+            return 0
         except Exception:
             return 0
 
@@ -300,6 +345,66 @@ def FovChangerThreadFunction(Options, Offsets):
         except Exception:
             return -1
 
+    # --- Гейт снайперок: снятие скоупа только со снайперок в руках ---
+    # Схема - единый источник noscopedot._get_schema() (классоспецифичная,
+    # калиброванная). Список индексов - noscopedot.SNIPER_ITEM_IDS: один
+    # список на проект, ноль копипасты. Нет схемы -> гейт закрывает снятие
+    # целиком (правило "нет поля - под-фича off"). Сбой чтения в момент
+    # входа в зум - "не снайперка", нативное поведение.
+    _gsch = noscopedot._get_schema()
+    g_ws = _gsch.get("m_pWeaponServices", 0)
+    g_aw = _gsch.get("m_hActiveWeapon", 0)
+    g_am = _gsch.get("m_AttributeManager", 0)
+    g_item = _gsch.get("m_Item", 0)
+    g_idx = _gsch.get("m_iItemDefinitionIndex", 0)
+    gate_ok = bool(g_ws and g_aw and g_am and g_item and g_idx)
+    if not gate_ok:
+        print("[fovchanger] гейт снайперок: нет схемы - снятие скоупа отключено", flush=True)
+
+    _sniper_ids = frozenset(noscopedot.SNIPER_ITEM_IDS)
+    gate_cache = {"h": -1, "sniper": False}
+
+    def _sniper_in_hands(proc, client_base, local_pawn):
+        """True - в руках AWP/SSG08/SCAR-20/G3SG1. False - другое оружие
+        или сбой чтения. Кэш по handle: индекс оружейной энтити постоянен,
+        handle меняется только при смене оружия."""
+        if not gate_ok:
+            return False
+        try:
+            ws = memfuncs.ProcMemHandler.ReadPointer(proc, local_pawn + g_ws)
+            if not ws:
+                return False
+            try:
+                handle = int(memfuncs.ProcMemHandler.ReadUInt(proc, ws + g_aw))
+            except Exception:
+                handle = int(memfuncs.ProcMemHandler.ReadInt(proc, ws + g_aw)) & 0xFFFFFFFF
+            if not handle:
+                return False
+            if handle == gate_cache["h"]:
+                return gate_cache["sniper"]
+            index = handle & HANDLE_SER_MASK
+            el = memfuncs.ProcMemHandler.ReadPointer(proc, client_base + o_entity_list)
+            if not el:
+                return False
+            le = memfuncs.ProcMemHandler.ReadPointer(
+                proc, el + ENT_BUCKET_STEP * (index >> 9) + ENT_IDENTITY)
+            if not le:
+                return False
+            ent = memfuncs.ProcMemHandler.ReadPointer(
+                proc, le + ENT_STRIDE * (index & HANDLE_IDX_MASK))
+            if not ent:
+                return False
+            # Индекс: uint16 по вложенной композиции атрибутов (та же
+            # калибровка, что в noscopedot; int32 затягивает соседнее
+            # m_iEntityQuality в старшую половину - мусор 0x4000X)
+            widx = int(memfuncs.ProcMemHandler.ReadUShort(proc, ent + g_am + g_item + g_idx))
+            is_sniper = widx in _sniper_ids
+            gate_cache["h"] = handle
+            gate_cache["sniper"] = is_sniper
+            return is_sniper
+        except Exception:
+            return False
+
     in_scope = False
     scope_entered_at = 0.0
     last_scope_signal_time = 0.0
@@ -307,6 +412,10 @@ def FovChangerThreadFunction(Options, Offsets):
     noscope_removed = False
     locked_scope_fov = 0
     zoom_lost_since = 0.0
+
+    # Гейт снайперок: фиксируется ОДИН раз на входе в зум (смена оружия
+    # в зуме невозможна), сбрасывается при выходе/смерти.
+    scope_is_sniper = False
 
     prev_raw_scoped = False
     raw_scoped_true_since = 0.0
@@ -321,6 +430,11 @@ def FovChangerThreadFunction(Options, Offsets):
 
     while True:
         try:
+            now0 = time.time()
+            if now0 - opts_ts >= OPTS_REFRESH:
+                opts_cache = dict(Options.items())
+                opts_ts = now0
+
             process = connector.ensure_process()
             client = connector.ensure_module("client.dll")
 
@@ -336,7 +450,7 @@ def FovChangerThreadFunction(Options, Offsets):
                 life_state = 0
 
             if life_state != 0:
-                if in_scope or bool(Options.get("NoScopeActive", False)):
+                if in_scope or bool(opts_cache.get("NoScopeActive", False)):
                     _set_noscope_active(False)
 
                 in_scope = False
@@ -350,6 +464,7 @@ def FovChangerThreadFunction(Options, Offsets):
                 prev_raw_scoped = False
                 prev_zoom_button_down = False
                 zoom_enter_press_at = 0.0
+                scope_is_sniper = False
 
                 time.sleep(0.02)
                 continue
@@ -366,10 +481,10 @@ def FovChangerThreadFunction(Options, Offsets):
                 except Exception:
                     local_controller = 0
 
-            fov_enabled = bool(Options.get("EnableFovChanger", False))
-            noscope_enabled = bool(Options.get("EnableNoScopeOverlay", False))
+            fov_enabled = bool(opts_cache.get("EnableFovChanger", False))
+            noscope_enabled = bool(opts_cache.get("EnableNoScopeOverlay", False))
 
-            desired_fov = _clamp(Options.get("FovChangeSize", 90), 90, 170) if fov_enabled else DEFAULT_FOV
+            desired_fov = _clamp(opts_cache.get("FovChangeSize", 90), 90, 170) if fov_enabled else DEFAULT_FOV
 
             raw_scoped = _read_bool(process, local_pawn + o_scoped) if o_scoped else False
 
@@ -454,6 +569,10 @@ def FovChangerThreadFunction(Options, Offsets):
                     noscope_removed = False
                     locked_scope_fov = 0
                     zoom_lost_since = 0.0
+                    # Гейт снайперок: решение принимается один раз на входе
+                    # в зум. AUG/SG553 не пройдут - их нативный скоуп остаётся
+                    # нетронутым, крест в core.py по той же схеме не рисуется.
+                    scope_is_sniper = _sniper_in_hands(process, client, local_pawn)
                     _set_noscope_active(False)
             else:
                 if (not raw_signal) and (now - last_scope_signal_time >= SCOPE_STATE_DEBOUNCE):
@@ -461,19 +580,21 @@ def FovChangerThreadFunction(Options, Offsets):
                     noscope_removed = False
                     locked_scope_fov = 0
                     zoom_lost_since = 0.0
+                    scope_is_sniper = False
                     _set_noscope_active(False)
 
             if in_scope and actual_zoom:
                 locked_scope_fov = current_fov
 
             # Отладка по желанию: включи "FovDebug": True
-            if bool(Options.get("FovDebug", False)) and now >= next_debug_log:
+            if bool(opts_cache.get("FovDebug", False)) and now >= next_debug_log:
                 try:
                     logutil.debug(
                         f"[fovchanger] raw={raw_scoped} actual={actual_zoom} allowed={raw_scope_allowed} "
                         f"btn={zoom_button_down} press={recent_zoom_press} zin={recent_zooming_in} "
                         f"signal={raw_signal} fov={current_fov} rate={fov_rate:.4f} zoom={zoom_level} "
                         f"in_scope={in_scope} removed={noscope_removed} locked={locked_scope_fov} "
+                        f"sniper={scope_is_sniper} "
                         f"since_scope={(now - last_scope_signal_time):.3f}"
                     )
                 except Exception:
@@ -481,7 +602,10 @@ def FovChangerThreadFunction(Options, Offsets):
                 next_debug_log = now + 1.0
 
             if in_scope:
-                if noscope_enabled:
+                # Гейт: снятие - только когда noscope включен И в руках
+                # снайперка. Не-снайперка -> else-ветка, там noscope_removed
+                # всегда False -> нативное поведение без единой записи.
+                if noscope_enabled and scope_is_sniper:
                     if not noscope_removed:
                         if (now - scope_entered_at) >= SCOPE_ENTER_GRACE_SEC:
                             noscope_removed = True
@@ -530,6 +654,7 @@ def FovChangerThreadFunction(Options, Offsets):
                             elif now - zoom_lost_since > ZOOM_LOST_TIMEOUT:
                                 in_scope = False
                                 noscope_removed = False
+                                scope_is_sniper = False
                                 _set_noscope_active(False)
                                 last_scope_signal_time = now
                                 zoom_lost_since = 0.0
@@ -621,3 +746,4 @@ def FovChangerThreadFunction(Options, Offsets):
             logutil.debug(f"[fovchanger] loop exception: {exc}")
             connector.invalidate()
             time.sleep(0.01)
+# markers: END features/fovchanger.py v10

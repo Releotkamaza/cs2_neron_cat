@@ -46,6 +46,14 @@ DEG_PER_COUNT = 0.022     # градусов поворота на один ка
 # IPC-копия настроек раз в 25 мс (сталл IPC не должен ронять окно прыжка)
 OPTS_REFRESH = 0.025
 
+# Кэш фокуса: GetForegroundWindow/GetWindowText на 1 кГц = ~1000 Win-вызовов/с
+# (конвенция "вин-вызовы - кэш 0.25 с", триггер-прецедент). Смена окна
+# символов не печатает - 250 мс задержки безопасны. Курсор-гейт НЕ кэшируется:
+# он защищает ввод (стрейф-клавиши в чате), ему нужна нулевая задержка.
+FOCUS_REFRESH = 0.25
+_fg_cache_title = ""
+_fg_cache_ts = 0.0
+
 CURSOR_SHOWING = 0x0001
 CURSOR_SUPPRESSED = 0x0002
 
@@ -285,12 +293,17 @@ class JumpTiming:
 
 def Bhop_Update(processHandle, clientBaseAddress, Offsets, opts, engine,
                 timing, dbg):
+    global _fg_cache_title, _fg_cache_ts
     try:
-        hwnd = win32gui.GetForegroundWindow()
-        try:
-            title = win32gui.GetWindowText(hwnd)
-        except Exception:
-            title = ""
+        now_fc = time.perf_counter()
+        if now_fc - _fg_cache_ts >= FOCUS_REFRESH:
+            try:
+                hwnd = win32gui.GetForegroundWindow()
+                _fg_cache_title = win32gui.GetWindowText(hwnd)
+            except Exception:
+                _fg_cache_title = ""
+            _fg_cache_ts = now_fc
+        title = _fg_cache_title
 
         dbg["fg"] = title
 

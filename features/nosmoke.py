@@ -45,6 +45,13 @@ OPTS_REFRESH = 0.5
 # Единый конвейер известных путей (как в fovchanger/bombtimer):
 # батник жёстко кладёт client_dll.json в output/, альтернативные имена
 # и поисковый проход по всем json не нужны.
+#
+# ПРИМЕЧАНИЕ ПО КОНВЕНЦИИ: _SCHEMA - плоский словарь "первое вхождение".
+# Это допустимый ФОЛЛБЕК под dataclass-приоритетом (_off ниже): поля
+# смока читаются от entity НАПРЯМУЮ, композиций (AM/Item/idx) здесь нет,
+# потому классоспецифичные пары не обязательны. Если поле в дампе
+# неуникально и первое вхождение когда-нибудь станет чужим - перевести
+# на pinned-классы по образцу noscopedot._get_schema().
 
 _json_cache = {}
 
@@ -126,6 +133,18 @@ def _build_marker_segments():
 
 
 _MARKER_SEGMENTS = _build_marker_segments()
+
+# Кэш цветов маркера: константы, собираются один раз (аналог _panel_colors
+# у spectator). Значения - списки (контракт pme).
+_MARKER_COLORS = None
+
+
+def _marker_colors(pme):
+    global _MARKER_COLORS
+    if _MARKER_COLORS is None:
+        base = pme.get_color(MARKER_COLOR)
+        _MARKER_COLORS = (pme.fade_color(base, 0.90), pme.fade_color(base, 0.35))
+    return _MARKER_COLORS
 
 
 def to_u64(x):
@@ -302,12 +321,12 @@ def render_smoke_markers(pme, processHandle, clientBase, off, smokes, screen_w, 
         return
     if not vm_bytes or len(vm_bytes) < 64:
         return
+    # Сырой кортеж, НЕ Matrix (без субскриптов); vm[12..15] - w-строка,
+    # индексация согласована с calculations.world_to_screen
     vm = struct.unpack("16f", vm_bytes)
 
-    # Цвета маркера - один раз на кадр, не на сегмент
-    base_col = pme.get_color(MARKER_COLOR)
-    col_near = pme.fade_color(base_col, 0.90)
-    col_far  = pme.fade_color(base_col, 0.35)
+    # Цвета маркера - кэш, один раз за жизнь процесса
+    col_near, col_far = _marker_colors(pme)
 
     def _proj(x, y, z):
         """Мировые координаты -> пиксели экрана (NDC -> pixels)."""

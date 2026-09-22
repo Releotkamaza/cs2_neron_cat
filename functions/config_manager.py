@@ -206,4 +206,3 @@ class ConfigHotkeyEngine:
             self._prev[name] = pressed
             if pressed and not was:
                 apply_profile(name, self.cfgmgr, Options, self.flags, local_opts)
-# markers: END functions/config_manager.py v1

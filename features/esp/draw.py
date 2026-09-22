@@ -1,4 +1,5 @@
 import pyMeow as pme
+import globals
 from .colors import clamp, resolve_color
 from .fonts import draw_text as _draw_text
 
@@ -23,14 +24,36 @@ def _pcol(hexstr):
     return c
 
 
+# Кэш resolve_color ТОЛЬКО для хэшируемых входов (константные hex-строки
+# из core). Уже-резолвнутые объекты идут напрямую, без кэша: попытка
+# использовать их ключом = TypeError (нехэшируемое), регресс v3 -
+# исключение на каждой энтити глоталось per-entity except, живы были
+# только трейсеры. v2-поведение для них сохранено 1:1.
+_rcol_cache = {}
+
+
+def _rcol(color):
+    try:
+        c = _rcol_cache.get(color)
+    except TypeError:
+        return resolve_color(color)
+    if c is None:
+        c = resolve_color(color)
+        try:
+            _rcol_cache[color] = c
+        except TypeError:
+            pass
+    return c
+
+
 def draw_shadowed_label(text, x, y, size=12, color="#FFFFFF"):
     global _SHADOW_COLOR, _PLATE_COLOR
-    base = resolve_color(color)
+    base = _rcol(color)
 
     if TEXT_OUTLINE_MODE == "shadow4":
         if _SHADOW_COLOR is None:
             _SHADOW_COLOR = pme.fade_color(resolve_color("#000000"), 0.65)
-        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        for ox, oy in ((-1, 0), (1, 0), (0, 1), (0, -1)):
             _draw_text(text, x + ox, y + oy, size=size, color=_SHADOW_COLOR)
         _draw_text(text, x, y, size=size, color=base)
         return
@@ -54,6 +77,12 @@ def draw_shadowed_label(text, x, y, size=12, color="#FFFFFF"):
 def draw_name(player_name, x, y, color="#FFFFFF", font_size=12):
     if player_name:
         draw_shadowed_label(player_name, x, y, size=font_size, color=color)
+
+
+def draw_weapon(weapon_name, x, y, color="#D9C9FF", font_size=12):
+    """Название активного оружия - тот же путь рендера, что Имя/Дистанция."""
+    if weapon_name:
+        draw_shadowed_label(weapon_name, x, y, size=font_size, color=color)
 
 
 def draw_distance(x, y, distance, color="#FFFFFF", font_size=12):
@@ -87,7 +116,7 @@ def draw_health_bar(health, x, y, height, bar_width=None, thickness_scale=1.0,
     if use_health_color and color_from_hex:
         col_fill = _pcol(color_from_hex)
     else:
-        col_fill = team_color if isinstance(team_color, tuple) else _pcol("#22C55E")
+        col_fill = team_color if isinstance(team_color, (tuple, list)) else _pcol("#22C55E")
     pme.draw_rectangle(track_x - 1, track_y - 1, track_w + 2, track_h + 2, color=col_border)
     pme.draw_rectangle(track_x, track_y, track_w, track_h, color=col_bg)
     filled = int(round(track_h * hp / 100.0))
@@ -97,7 +126,7 @@ def draw_health_bar(health, x, y, height, bar_width=None, thickness_scale=1.0,
 
 
 def draw_box(rect_left, rect_top, rect_width, rect_height, color, thickness_scale=1.0):
-    base = resolve_color(color)
+    base = _rcol(color)
     x1, y1 = int(rect_left), int(rect_top)
     x2, y2 = int(rect_left + rect_width), int(rect_top + rect_height)
     size = max(1.0, float(min(rect_width, rect_height)))
@@ -121,7 +150,7 @@ def draw_box(rect_left, rect_top, rect_width, rect_height, color, thickness_scal
 
 
 def draw_skeleton(bones, bone_connections, color, thickness=None, joint_radius=None):
-    col = resolve_color(color)
+    col = _rcol(color)
     if thickness is None or joint_radius is None:
         try:
             xs = [pt.x for pt in bones.values() if pt.x >= 0 and pt.y >= 0]
@@ -148,14 +177,14 @@ def draw_skeleton(bones, bone_connections, color, thickness=None, joint_radius=N
         pass
 
 
+# Длительность <= этого порога считаем дефюзом "с китом"
+_KIT_DEFUSE_MAX = 7.0
+
+
 def draw_bomb_status_card(*, planted, time_left, total_time=40.0,
                           defusing=False, defuse_left=None, defuse_total=None,
                           defuse_impossible=False):
-    import globals
     try:
-        # Длительность <= этого порога считаем дефюзом "с китом"
-        _KIT_DEFUSE_MAX = 7.0
-
         screen_h = globals.SCREEN_HEIGHT
         card_w = 236
         show_defuse = bool(planted and defusing and defuse_left is not None)
@@ -247,4 +276,5 @@ def draw_bomb_status_card(*, planted, time_left, total_time=40.0,
                 pme.draw_rectangle(bar_x, bar_y, fill_width, bar_height, pme.fade_color(status_accent, 0.82))
             pme.draw_rectangle_lines(bar_x, bar_y, bar_width, bar_height, pme.fade_color(status_accent, 0.65), lineThick=1.0)
     except Exception:
+        # Фича подтверждена: молча не рвём кадр оверлея
         pass

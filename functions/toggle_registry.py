@@ -1,3 +1,4 @@
+
 import time
 import win32api
 
@@ -14,6 +15,7 @@ TOGGLE_FEATURES = [
     ("EnableFovChanger", "Смена FOV"),
     ("EnableNoSmoke", "Удаление смоков"),
     ("EnableNoScopeOverlay", "Убрать скоуп"),
+    ("EnableNoScopeDot", "Точка ноускопа"),
     ("EnableESPBombTimer", "Таймер бомбы"),
     ("EnableShowSpectators", "Наблюдатели"),
 ]
@@ -74,13 +76,18 @@ class HotkeyEngine:
             was = self._prev.get(key, False)
             self._prev[key] = pressed
             if pressed and not was:
+                # База инверсии - актуальное значение из Options, а не из
+                # local_opts (тот свежее ~100 мс): хоткей сразу после клика
+                # в GUI не должен инвертировать устаревшее и затирать клик.
                 try:
-                    new_val = not bool(local_opts.get(key, False))
+                    new_val = not bool(Options.get(key, False))
                 except Exception:
-                    new_val = True
+                    try:
+                        new_val = not bool(local_opts.get(key, False))
+                    except Exception:
+                        new_val = True
                 try:
                     Options[key] = new_val
                 except Exception:
                     pass
                 local_opts[key] = new_val
-# markers: END functions/toggle_registry.py v2

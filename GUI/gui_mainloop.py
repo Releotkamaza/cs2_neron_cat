@@ -429,13 +429,17 @@ class NERON_GUI:
 
     def _sync_external(self):
         """Подтягивает в галочки значения, изменённые вне GUI (общий движок
-        тогглов). Пары строятся из реестра автоматически."""
+        тогглов). Один снапшот .items() на тик вместо RPC на каждый тоггл."""
+        try:
+            snap = dict(self.config.items())
+        except Exception:
+            return
         for key, _label in toggle_registry.TOGGLE_FEATURES:
             tag = self._sync_tags.get(key)
             if not tag:
                 continue
             try:
-                want = bool(self.config.get(key, False))
+                want = bool(snap.get(key, False))
                 if bool(dpg.get_value(tag)) != want:
                     dpg.set_value(tag, want)
             except Exception:
@@ -701,6 +705,17 @@ class NERON_GUI:
         except Exception:
             return
 
+        # Зажатая кнопка мыши: попап полностью замирает. Раньше фокус и
+        # позиция дёргались каждый кадр ПОСРЕДИ клика - DPG сбрасывал
+        # active-id чекбокса, и клик отменялся до отпускания кнопки.
+        try:
+            if dpg.is_mouse_button_down(0):
+                if self._hover_open_key is not None:
+                    self._hover_linger = now + 0.35
+                return
+        except Exception:
+            pass
+
         hovered = None
         for item, key, label in self._hover_rows:
             try:
@@ -735,22 +750,26 @@ class NERON_GUI:
                     )
                 except Exception:
                     pass
-            try:
-                px = min(mx + 14, self.viewport_width - 226)
-                py = max(4, min(my - 10, self.viewport_height - 132))
-                dpg.set_item_pos(self._hover_popup, (px, py))
-                if not dpg.is_item_shown(self._hover_popup):
+                # Открытие: позиция/показ/фокус - ОДИН раз на переходе,
+                # не каждый кадр. Каждый-кадровый focus_item убивал клики.
+                try:
+                    px = min(mx + 14, self.viewport_width - 226)
+                    py = max(4, min(my - 10, self.viewport_height - 132))
+                    dpg.set_item_pos(self._hover_popup, (px, py))
                     dpg.configure_item(self._hover_popup, show=True)
-                # Держим попап поверх root: клик по галочке поднимает root,
-                # фокус каждый кадр возвращает попап наверх.
-                dpg.focus_item(self._hover_popup)
-            except Exception:
-                pass
+                    dpg.focus_item(self._hover_popup)
+                except Exception:
+                    pass
             self._hover_linger = now + 0.35
         elif inside_popup:
             self._hover_linger = now + 0.35
+            # Если клик по галочке поднял root и попап ушёл под окно -
+            # возвращаем фокус, но только пока попап реально НЕ наведён.
+            # Когда курсор на нём и он сверху - фокус не трогаем, чтобы
+            # не убить клик по кнопке бинда.
             try:
-                dpg.focus_item(self._hover_popup)
+                if not dpg.is_item_hovered(self._hover_popup):
+                    dpg.focus_item(self._hover_popup)
             except Exception:
                 pass
         elif now > self._hover_linger and self._hover_open_key is not None:
@@ -866,6 +885,7 @@ class NERON_GUI:
                 dpg.add_spacer(height=6, parent=left_col)
                 dpg.add_text("Labels", color=self.palette["text_muted"], parent=left_col)
                 self._config_checkbox("Имя", "EnableESPNameText", parent=left_col)
+                self._config_checkbox("Оружие", "EnableESPWeaponText", parent=left_col)
                 self._config_checkbox("Дистанция", "EnableESPDistanceText", parent=left_col)
                 self._config_checkbox("Вывод HP", "EnableESPHealthText", parent=left_col)
                 self._config_checkbox("HP Bar", "EnableESPHealthBarRendering", parent=left_col)
@@ -1154,7 +1174,7 @@ class NERON_GUI:
         with dpg.tab(label="Прочее") as tab:
             self._bind_tab(tab, "Прочее")
             card = self._tab_card("Прочее", "Прочие различные настройки.")
-            self._config_checkbox("Убрать чёрный скоуп (AWP/SSG)", "EnableNoScopeOverlay", parent=card)
+            self._config_checkbox("Убрать чёрный скоуп (AWP/SSG/SCAR-20/G3SG1)", "EnableNoScopeOverlay", parent=card)
             self._config_checkbox("Точка при ноускопе (AWP/SSG/SCAR-20/G3SG1)", "EnableNoScopeDot", parent=card)
             self._config_slider_float("Радиус точки (px)", "NoScopeDot_radius", 5.0, 1.0, 12.0, parent=card, format="%.1f")
             self._config_slider_int("Непрозрачность точки (%)", "NoScopeDot_opacity", 80, 10, 100, parent=card)

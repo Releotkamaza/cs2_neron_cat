@@ -10,19 +10,29 @@ HANDLE_SER_MASK = 0x7FFF   # серийно-индексные биты handle
 HANDLE_IDX_MASK = 0x1FF    # индекс внутри бакета
 SPOTTED_BIT_OFFSET = 1     # бит локального игрока в маске = local_index - 1
 
+# Слот локального контроллера константен всю карту, меняется только сам
+# контроллер (смена карты/реконнект). Кэш по адресу контроллера: 2 RPM на
+# промахе (раз за карту), 0 RPM на хите. Раньше - до 128 RPM на КАЖДЫЙ
+# проход сканера (list_entry перечитывался на каждой итерации цикла).
+_local_index_cache = {"ctrl": 0, "idx": 0}
+
 
 def resolve_local_index(processHandle, EntityList, local_controller_addr) -> int:
     """Индекс слота локального контроллера в entity list (для бита в маске)."""
+    if _local_index_cache["ctrl"] == local_controller_addr and _local_index_cache["idx"]:
+        return _local_index_cache["idx"]
     try:
+        # Слоты 1..64 живут в бакете 0 (i >> 9 == 0): list_entry - одно чтение
+        list_entry = memfuncs.ProcMemHandler.ReadPointer(
+            processHandle, EntityList + ENT_IDENTITY)
+        if not list_entry:
+            return 0
         for i in range(1, 65):
-            list_entry = memfuncs.ProcMemHandler.ReadPointer(
-                processHandle,
-                EntityList + (ENT_BUCKET_STEP * (i & HANDLE_SER_MASK) >> 9) + ENT_IDENTITY)
-            if not list_entry:
-                continue
             controller = memfuncs.ProcMemHandler.ReadPointer(
-                processHandle, list_entry + ENT_STRIDE * (i & HANDLE_IDX_MASK))
+                processHandle, list_entry + ENT_STRIDE * i)
             if controller == local_controller_addr:
+                _local_index_cache["ctrl"] = local_controller_addr
+                _local_index_cache["idx"] = i
                 return i
     except Exception:
         return 0

@@ -14,6 +14,11 @@ LOOP_SLEEP = 0.005
 # Пауза, когда антифлеш выключен и яркость уже нормализована: нет смысла
 # 200 раз в секунду читать павн ради "ничего не делать"
 IDLE_SLEEP = 0.05
+# Период локального кэша тоггла: Options - Manager-прокси, .get() в
+# цикле на 200 Гц давал ~200 IPC/с (нарушение конвенции "Manager-IPC
+# в мс-циклах запрещён", триггер-прецедент). Кэш 10 Гц: 10 RPC/с,
+# тоггл применяется с задержкой <= 0.1 с.
+OPTS_REFRESH = 0.1
 
 
 def AntiFlashThreadFunction(Options, Offsets):
@@ -21,27 +26,36 @@ def AntiFlashThreadFunction(Options, Offsets):
     # Помним предыдущее состояние, чтобы один раз вернуть яркость при выключении
     last_enabled = None
 
+    # Оффсеты статичны после старта (SimpleNamespace из main) - hoist
+    off = Offsets.offset
+
+    enable_local = bool(Options.get("EnableAntiFlashbang", False))
+    opts_ts = time.time()
+
     while True:
         try:
+            now = time.time()
+            if now - opts_ts >= OPTS_REFRESH:
+                enable_local = bool(Options.get("EnableAntiFlashbang", False))
+                opts_ts = now
+
             process = connector.ensure_process()
             client = connector.ensure_module("client.dll")
 
-            enabled = bool(Options.get("EnableAntiFlashbang", False))
-
             # Быстрый путь: выключено и нормализовано - спим дольше без чтений памяти
-            if not enabled and last_enabled is False:
+            if not enable_local and last_enabled is False:
                 time.sleep(IDLE_SLEEP)
                 continue
 
             local_pawn = memfuncs.ProcMemHandler.ReadPointer(
-                process, client + Offsets.offset.dwLocalPlayerPawn
+                process, client + off.dwLocalPlayerPawn
             )
             if not local_pawn:
                 last_enabled = None
                 time.sleep(0.01)
                 continue
 
-            addr = local_pawn + Offsets.offset.m_flFlashMaxAlpha
+            addr = local_pawn + off.m_flFlashMaxAlpha
 
             # Перепроверка павна ПЕРЕД записью: между чтением и записью павн
             # может освободиться (смерть/загрузка карты/конец матча), запись
@@ -50,12 +64,12 @@ def AntiFlashThreadFunction(Options, Offsets):
             def _pawn_alive():
                 try:
                     return memfuncs.ProcMemHandler.ReadPointer(
-                        process, client + Offsets.offset.dwLocalPlayerPawn
+                        process, client + off.dwLocalPlayerPawn
                     ) == local_pawn
                 except Exception:
                     return False
 
-            if enabled:
+            if enable_local:
                 # Постоянно держим 0: игра каждый тик пытается вернуть 255,
                 # поэтому разовая запись не работает.
                 if _pawn_alive():

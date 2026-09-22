@@ -6,7 +6,6 @@ import pyMeow as pme
 _OVERLAY_FONT_PATH = None
 _OVERLAY_FONT_PROBED = False
 _OVERLAY_FONT_CACHE = {}
-_OVERLAY_FONT_WARNED = set()
 
 _RAYLIB_FONT_ID = None
 _RAYLIB_FONT_ATTEMPTED = False
@@ -93,14 +92,20 @@ def _get_overlay_font_handle(size: int = 16):
     except Exception:
         handle = None
     _OVERLAY_FONT_CACHE[key] = handle
-    if handle is None and key not in _OVERLAY_FONT_WARNED:
-        _OVERLAY_FONT_WARNED.add(key)
     return handle
 
 def draw_text(text, x, y, *, size, color):
-    try:
-        col = color if isinstance(color, tuple) else pme.get_color(color)
-    except Exception:
+    # Цвет: строки (hex) - парсим (фоллбэк белый: битый hex раньше убивал
+    # текст целиком), не-строки - как есть. Резолвнутые цвета из draw.py/
+    # colors.py - СПИСКИ (контракт pme, см. colors.py): раньше они шли в
+    # pme.get_color и работали ТОЛЬКО через глотаемое исключение на каждом
+    # вызове (тысячи/сек на текстовом рендере).
+    if isinstance(color, str):
+        try:
+            col = pme.get_color(color)
+        except Exception:
+            col = pme.get_color("#FFFFFF")
+    else:
         col = color
     xi = int(round(x)); yi = int(round(y)); sz = max(10, int(round(size)))
     s = str(text)

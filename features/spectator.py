@@ -20,7 +20,9 @@ def _log(level: int, msg: str):
     if _SPEC_LOG_LEVEL >= level:
         logutil.debug(msg)
 
-# Кэш цветов панели (создаётся один раз, а не каждый кадр)
+# Кэш цветов панели (создаётся один раз, а не каждый кадр).
+# Значения - СПИСКИ (контракт pme, см. features/esp/colors.py): fonts v2
+# принимает их как есть, без exception-налога старого isinstance-tuple пути.
 _PANEL_COLORS = None
 
 def _panel_colors(pme):
@@ -58,6 +60,17 @@ MAX_ENTITIES      = 128
 MASK64   = 0xFFFFFFFFFFFFFFFF
 USER_LOW  = 0x0000000000100000
 USER_HIGH = 0x00007FFFFFFFFFFF
+
+# ==================== Структурные константы entity-листа ====================
+# Те же значения, что во всей кодовой базе (esp/core, nosmoke, aimbot,
+# triggerbot, bhop); в дампах их нет по определению. Были инлайном -
+# выровнены на канон проекта (именованные в шапках).
+ENT_BUCKET_STEP = 0x8      # шаг бакетов entity list
+ENT_IDENTITY = 0x10        # смещение CEntityIdentity в слоте
+ENT_STRIDE = 112           # канонический stride слота
+LIFESTATE_ALIVE = 256
+HANDLE_SER_MASK = 0x7FFF   # серийно-индексные биты handle
+HANDLE_IDX_MASK = 0x1FF    # индекс внутри бакета
 
 def to_u64(x):
     try:
@@ -114,25 +127,27 @@ def read_controller_name(h, ctrl, off):
     return read_cstr_utf8(h, ctrl + off.m_sSanitizedPlayerName, 64) or "UNKNOWN"
 
 def ent_by_index_112(h, entlist_ptr, i):
-    entry2 = rd_ptr(h, entlist_ptr + 0x8 * (i >> 9) + 0x10)
+    entry2 = rd_ptr(h, entlist_ptr + ENT_BUCKET_STEP * (i >> 9) + ENT_IDENTITY)
     if not entry2:
         return 0
-    e = rd_ptr(h, entry2 + 112 * (i & 0x1FF))
+    e = rd_ptr(h, entry2 + ENT_STRIDE * (i & HANDLE_IDX_MASK))
     return e if is_valid_ptr(e) else 0
 
 def handle_to_ent_stride(h, entlist_ptr, handle, stride):
     h32 = handle & 0xFFFFFFFF
     if h32 == 0 or h32 == 0xFFFFFFFF:
         return 0
-    bucket = (h32 & 0x7FFF) >> 9
-    idx    = (h32 & 0x1FF)
-    entry2 = rd_ptr(h, entlist_ptr + 0x8 * bucket + 0x10)
+    bucket = (h32 & HANDLE_SER_MASK) >> 9
+    idx    = (h32 & HANDLE_IDX_MASK)
+    entry2 = rd_ptr(h, entlist_ptr + ENT_BUCKET_STEP * bucket + ENT_IDENTITY)
     if not entry2:
         return 0
     e = rd_ptr(h, entry2 + stride * idx)
     return e if is_valid_ptr(e) else 0
 
 def handle_to_ent_adaptive(h, entlist_ptr, handle):
+    # Канон - 112. Ветка 120 - рудимент адаптации к прошлой смене stride,
+    # на актуальной игре мертва; оставлена до отдельного решения о сносе.
     e = handle_to_ent_stride(h, entlist_ptr, handle, 112)
     if e:
         return e, 112
@@ -153,7 +168,7 @@ def is_dead(h, pawn, off):
     life_off = getattr(off, "m_lifeState", 0)
     if life_off:
         life = rd_int(h, pawn + life_off)
-        if life != 256:
+        if life != LIFESTATE_ALIVE:
             return True
     return False
 
@@ -179,12 +194,7 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
     off = Offsets.offset
     _log(1, "[spectator] thread started.")
 
-    try:
-        allow_fixed = bool(Options.get("SpectatorAllowFixed", True))
-    except Exception:
-        allow_fixed = True
-
-    ALLOWED_MODES = {OBS_MODE_IN_EYE, OBS_MODE_CHASE, OBS_MODE_FREEZECAM} | ({OBS_MODE_FIXED} if allow_fixed else set())
+    ALLOWED_MODES_BASE = {OBS_MODE_IN_EYE, OBS_MODE_CHASE, OBS_MODE_FREEZECAM}
     last_sig = None
 
     while True:
@@ -192,6 +202,8 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
             hproc = connector.ensure_process()
             client = connector.ensure_module("client.dll")
 
+            # Раз в проход (0.5 с): EnableShowSpectators и SpectatorAllowFixed -
+            # живые настройки, применяются без рестарта воркера.
             try:
                 if not bool(Options.get("EnableShowSpectators", False)):
                     Runtime.spectators = []
@@ -199,6 +211,11 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                     continue
             except Exception:
                 pass
+            try:
+                allow_fixed = bool(Options.get("SpectatorAllowFixed", True))
+            except Exception:
+                allow_fixed = True
+            ALLOWED_MODES = ALLOWED_MODES_BASE | ({OBS_MODE_FIXED} if allow_fixed else set())
 
             entlist_ptr = rd_ptr(hproc, client + off.dwEntityList)
             if not entlist_ptr:
@@ -218,7 +235,7 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
             local_pawn, route = resolve_local_pawn(hproc, client, off, entlist_ptr)
             local_ctrl_ptr = rd_ptr(hproc, client + off.dwLocalPlayerController)
             local_hpawn_handle = rd_int(hproc, local_ctrl_ptr + off.m_hPlayerPawn) if local_ctrl_ptr else 0
-            local_handle_idx = (local_hpawn_handle & 0x7FFF) if local_hpawn_handle not in (0, 0xFFFFFFFF) else 0
+            local_handle_idx = (local_hpawn_handle & HANDLE_SER_MASK) if local_hpawn_handle not in (0, 0xFFFFFFFF) else 0
 
             local_ctrl_idx = 0
             if local_ctrl_ptr:
@@ -280,7 +297,7 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                     hTarget = rd_int(hproc, obs_services + off.m_hObserverTarget)
                     if hTarget not in (0, 0xFFFFFFFF):
                         target_ent, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hTarget)
-                        target_idx = hTarget & 0x7FFF
+                        target_idx = hTarget & HANDLE_SER_MASK
 
                 view_entity = 0
                 view_idx = 0
@@ -291,7 +308,7 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
                         hView = rd_int(hproc, cam + off.m_hViewEntity)
                         if hView not in (0, 0xFFFFFFFF):
                             view_entity, _ = handle_to_ent_adaptive(hproc, entlist_ptr, hView)
-                            view_idx = hView & 0x7FFF
+                            view_idx = hView & HANDLE_SER_MASK
 
                 match = bool(
                     (target_ent and (target_ent == local_pawn or target_ent == local_ctrl_ptr)) or
@@ -336,8 +353,9 @@ def render_spectator_block(
     spectators,
     enabled=True,
     screen_size=None,
-    font_path=None,
-    font_handle=None,
+    font_path=None,   # мёртв (тело использует _fd/font_id); оставлен для
+                      # совместимости вызова из esp/core - снос синхронно с core
+    font_handle=None, # мёртв по той же причине
     font_size=16,
     font_id=None
 ):
@@ -382,6 +400,9 @@ def render_spectator_block(
         pme.draw_rectangle(x, y, 3, block_h, cols["accent"])
 
         try:
+            # Локальный импорт - НЕ поднимать на уровень модуля: esp/__init__
+            # тянет core, core тянет spectator - верхнеуровневый импорт даёт
+            # цикл. Обход осознанный, проверен рантаймом.
             from features.esp.fonts import draw_text as _fd
             _fd(title, x + pad_x, y + pad_y, size=title_size, color=cols["title"])
 

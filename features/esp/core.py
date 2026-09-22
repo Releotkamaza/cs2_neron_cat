@@ -1,4 +1,3 @@
-# markers: START features/esp/core.py v5.1
 from ext.datatypes import *
 from functions import memfuncs
 from functions import calculations
@@ -8,7 +7,7 @@ from features import spectator
 from features import nosmoke as _ns_mod
 from features import noscopedot
 from .draw import (draw_box, draw_skeleton, draw_distance, draw_health_text,
-                   draw_name, draw_health_bar, draw_bomb_status_card)
+                   draw_name, draw_health_bar, draw_weapon, draw_bomb_status_card)
 from .fonts import _find_overlay_font, _ensure_raylib_font, _get_overlay_font_handle
 from .colors import resolve_color, health_color_hex
 from .visibility import resolve_local_index, is_visible_to_local
@@ -50,9 +49,13 @@ def _health_col(hp):
     return c
 
 
+# pawn/scene_node - адреса для перечитки свежих данных прямо в кадре
+# рендера (снапшот стареет на время скана - на быстрых целях скелеты
+# отставали от моделек).
 CachedEntity = namedtuple('CachedEntity',
                           ['team', 'is_enemy', 'health', 'origin', 'head', 'bones',
-                           'pelvis', 'name', 'visible', 'dist'])
+                           'pelvis', 'name', 'visible', 'dist', 'weapon',
+                           'pawn', 'scene_node'])
 
 # ==================== Структурные константы ====================
 # В дампах cs2-dumper их нет по определению (дамп отдаёт только поля схем
@@ -70,6 +73,31 @@ LIFESTATE_ALIVE = 256
 BOX_TOP_OFFSET = 70.0      # верх коробки над origin
 MIN_TARGET_DIST = 35.0     # отсечка по дистанции до локального игрока
 TRACER_BONE_INDEX = 0      # кость 0: таз, низ-центр модели - крепление трейсеров
+
+# Опорные кости bulk-ридера: eye/neck деривятся из PLAYER_BONES (единый
+# источник индексов - ext/datatypes, смена там подхватывается здесь
+# автоматически). Fallback-кость головы - отдельная калибровочная
+# константа (кросс-ссылки в PLAYER_BONES нет).
+BONE_EYE_L = PLAYER_BONES.get("eye_L", 25)
+BONE_EYE_R = PLAYER_BONES.get("eye_R", 26)
+BONE_NECK = PLAYER_BONES.get("neck", 6)
+BONE_HEAD_FALLBACK = 7
+
+# Окно кластера полей: если поля сидят ближе этого разброса - одно bulk
+# чтение вместо чтения на каждое поле. НЕ оффсет, порог эвристики.
+CLUSTER_MAX_SPREAD = 1024
+
+# TTL свежей перечитки костей: игра обновляет анимацию со своей частотой
+FRESH_TTL_SEC = 0.007
+
+_fresh_cache = {}   # pawn -> (origin, head, bones, pelvis, ts)
+
+
+def _vec3_zero(v):
+    """Сигнатура сбоя чтения при семантике memfuncs v2.1 (ноль вместо
+    ошибки). Реальный игрок в точном (0,0,0) карты не стоит."""
+    return v.x == 0.0 and v.y == 0.0 and v.z == 0.0
+
 
 # ==================== Кэш имён ====================
 # Валидное имя кэшируется на NAME_TTL_OK, неудачное ("?") перечитывается
@@ -134,10 +162,10 @@ def _read_bones_bulk(processHandle, bone_matrix):
         x, y, z = struct.unpack_from('<3f', buf, i * BONE_STRIDE)
         return Vector3(x, y, z)
 
-    eye_l = bone(25)
-    eye_r = bone(26)
-    neck = bone(6)
-    fb = bone(7)
+    eye_l = bone(BONE_EYE_L)
+    eye_r = bone(BONE_EYE_R)
+    neck = bone(BONE_NECK)
+    fb = bone(BONE_HEAD_FALLBACK)
     head = _head_from(eye_l, eye_r, neck, fb)
     pelvis = bone(TRACER_BONE_INDEX)
     bones = {}
@@ -147,6 +175,60 @@ def _read_bones_bulk(processHandle, bone_matrix):
         bones[bname] = bone(bidx)
     return head, bones, pelvis
 
+
+def _filter_skeleton(bones, origin, head):
+    """Отсев мусорных костей (далеко от origin - разъехавшаяся анимация)
+    + подмена head. >= 2 валидных костей, иначе None."""
+    if not bones:
+        return None
+    filtered = {}
+    for bname, wp in bones.items():
+        if (abs(wp.x - origin.x) > 200 or abs(wp.y - origin.y) > 200
+                or abs(wp.z - origin.z) > 200):
+            continue
+        filtered[bname] = wp
+    if len(filtered) >= 2:
+        filtered["head"] = head
+        return filtered
+    return None
+
+
+def _fresh_draw_data(processHandle, ent, o, want_bones):
+    """Свежие origin/кости ПРЯМО в кадре рендера, TTL-кэш по pawn:
+    рендер не чаще игры перечитывает одни и те же кости. Сбой чтения ->
+    None-поля: рисуем по снапшоту, энтити не мигает. want_bones=False -
+    только origin (кости не рисуем)."""
+    now = time.time()
+    cached = _fresh_cache.get(ent.pawn)
+    if cached is not None:
+        c_origin, c_head, c_bones, c_pelvis, ts = cached
+        if now - ts < FRESH_TTL_SEC:
+            if want_bones:
+                return c_origin, c_head, c_bones, c_pelvis
+            return c_origin, None, None, None
+    try:
+        origin = memfuncs.ProcMemHandler.ReadVec(processHandle, ent.pawn + o.m_vOldOrigin)
+        if origin is None or _vec3_zero(origin):
+            return None, None, None, None
+        if not want_bones or not ent.scene_node:
+            result = (origin, None, None, None)
+        else:
+            try:
+                bm = memfuncs.ProcMemHandler.ReadPointer(
+                    processHandle, ent.scene_node + o.m_modelState + BONE_ARRAY_OFF)
+                if not bm:
+                    result = (origin, None, None, None)
+                else:
+                    head, bones, pelvis = _read_bones_bulk(processHandle, bm)
+                    result = (origin, head, bones, pelvis)
+            except Exception:
+                result = (origin, None, None, None)
+        if len(_fresh_cache) > 128:
+            _fresh_cache.clear()
+        _fresh_cache[ent.pawn] = result + (now,)
+        return result
+    except Exception:
+        return None, None, None, None
 
 _last_focus_check = 0.0
 _last_focus_result = False
@@ -184,8 +266,11 @@ def _neron_has_focus():
 
 
 # ==================== Поток-ридер ====================
-# Сканирование entity вынесено из рендер-потока: ридер непрерывно строит
-# снапшот, рендер-кадр читает только viewMatrix и рисует готовый список.
+# Сканер строит снапшот валидности (кто жив/враг/дистанция) + адреса
+# pawn/scene_node. Свежую геометрию перечитывает сам рендер-кадр
+# (_fresh_draw_data) - скелеты не отстают от моделек. Проход сканера
+# ускорен bulk-чтениями: массив контроллеров одним куском + кластеры
+# полей (см. _scan_once).
 
 _reader_state = {
     "proc": None,
@@ -222,6 +307,82 @@ def _get_player_name(proc, controller, o):
     return name
 
 
+# ==================== Оружие в руках (Weapon Text) ====================
+# Индекс активного оружия - по калиброванной композиции noscopedot:
+#   pawn + m_pWeaponServices -> ws + m_hActiveWeapon -> entity по handle
+#   (конвенция entity-листа) -> ent + m_AttributeManager(C_EconEntity)
+#   + m_Item(C_AttributeContainer) + m_iItemDefinitionIndex
+#   (C_EconItemView), uint16.
+# Схема - единый источник noscopedot._get_schema(): те же (класс, поле)
+# из дампа, никакого копипаста пар. Кэш по handle: индекс оружейной
+# энтити постоянен, handle меняется только при смене оружия.
+_wpn_idx_cache = {}    # weapon handle -> item definition index
+
+# Item definition index -> имя. Игровые константы (не оффсеты, в дампах
+# их нет по определению). Нет в таблице -> текст не рисуется.
+WEAPON_NAMES = {
+    1: "Deagle", 2: "Dualies", 3: "Five-Seven", 4: "Glock-18",
+    7: "AK-47", 8: "AUG", 9: "AWP", 10: "FAMAS", 11: "G3SG1",
+    13: "Galil AR", 14: "M249", 16: "M4A4", 17: "MAC-10", 19: "P90",
+    23: "MP5-SD", 24: "UMP-45", 25: "XM1014", 26: "PP-Bizon",
+    27: "MAG-7", 28: "Negev", 29: "Sawed-Off", 30: "Tec-9",
+    32: "P2000", 33: "MP7", 34: "MP9", 35: "Nova", 36: "P250",
+    38: "SCAR-20", 39: "SG 553", 40: "SSG 08", 42: "Knife", 59: "Knife",
+    60: "M4A1-S", 61: "USP-S", 63: "CZ75-Auto", 64: "R8 Revolver",
+    43: "Flash", 44: "HE", 45: "Smoke", 46: "Molotov", 47: "Decoy",
+    48: "Incendiary", 49: "C4", 68: "Zeus",
+}
+
+
+def _weapon_display_name(idx):
+    if idx in WEAPON_NAMES:
+        return WEAPON_NAMES[idx]
+    if 500 <= idx <= 560:
+        return "Knife"   # скиновые ножи, item def range
+    return None
+
+
+def _read_active_weapon_idx(proc, entity_list, pawn, o, sch):
+    """Индекс активного оружия павна. Ошибка чтения / неполная схема -
+    None (текст просто не рисуется)."""
+    ws_off = sch.get("m_pWeaponServices", 0)
+    aw_off = sch.get("m_hActiveWeapon", 0)
+    am_off = sch.get("m_AttributeManager", 0)
+    item_off = sch.get("m_Item", 0)
+    idx_off = sch.get("m_iItemDefinitionIndex", 0)
+    if not (ws_off and aw_off and am_off and item_off and idx_off):
+        return None
+    try:
+        ws = memfuncs.ProcMemHandler.ReadPointer(proc, pawn + ws_off)
+        if not ws:
+            return None
+        try:
+            handle = int(memfuncs.ProcMemHandler.ReadUInt(proc, ws + aw_off))
+        except Exception:
+            handle = int(memfuncs.ProcMemHandler.ReadInt(proc, ws + aw_off)) & 0xFFFFFFFF
+        if not handle:
+            return None
+        idx = _wpn_idx_cache.get(handle)
+        if idx is not None:
+            return idx
+        index = handle & HANDLE_SER_MASK
+        le = memfuncs.ProcMemHandler.ReadPointer(
+            proc, entity_list + ENT_BUCKET_STEP * (index >> 9) + ENT_IDENTITY)
+        if not le:
+            return None
+        ent = memfuncs.ProcMemHandler.ReadPointer(
+            proc, le + ENT_STRIDE * (index & HANDLE_IDX_MASK))
+        if not ent:
+            return None
+        idx = int(memfuncs.ProcMemHandler.ReadUShort(proc, ent + am_off + item_off + idx_off))
+        if len(_wpn_idx_cache) > 512:
+            _wpn_idx_cache.clear()
+        _wpn_idx_cache[handle] = idx
+        return idx
+    except Exception:
+        return None
+
+
 def _scan_once(st):
     proc = st["proc"]
     client = st["client"]
@@ -235,6 +396,7 @@ def _scan_once(st):
     opt_skeleton = bool(opts.get("EnableESPSkeletonRendering", False))
     opt_name = bool(opts.get("EnableESPNameText", False))
     opt_visible = bool(opts.get("ESP_VisibleCheckBox", False))
+    opt_weapon = bool(opts.get("EnableESPWeaponText", False))
 
     render_required = bool(opts.get("EnableESP", True)) and any((
         opts.get("EnableESPBoxRendering", False),
@@ -244,22 +406,74 @@ def _scan_once(st):
         opts.get("EnableESPHealthBarRendering", False),
         opts.get("EnableESPTracerRendering", False),
         opts.get("EnableESPSkeletonRendering", False),
+        opts.get("EnableESPWeaponText", False),
     ))
     if not render_required:
         return []
 
+    # Локальные данные:
+    #   нет павна (меню/лобби/загрузка) или исключение -> [] - гасим ESP.
+    #   Нулевой origin - НЕ сбой: мёртвый/спектирующий павн отдаёт (0,0,0),
+    #   скан обязан продолжаться (живые враги видны, умершие исчезают).
+    #   Отсечка MIN_TARGET_DIST при нулевом origin самонейтрализуется:
+    #   мировые координаты далеки от нуля, dist заведомо > порога.
+    #   (История: гейт нулей из v5.7 замораживал снапшот призраками,
+    #   затем [] глушил ESP после смерти - оба регресса отсюда.)
     try:
         local_pawn = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwLocalPlayerPawn)
         if not local_pawn:
-            return None
+            return []
         local_controller = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwLocalPlayerController)
         local_team = memfuncs.ProcMemHandler.ReadInt(proc, local_pawn + o.m_iTeamNum)
         local_origin = memfuncs.ProcMemHandler.ReadVec(proc, local_pawn + o.m_vOldOrigin)
         entity_list = memfuncs.ProcMemHandler.ReadPointer(proc, client + o.dwEntityList)
     except Exception:
-        return None
-    if not entity_list or local_origin is None:
-        return None
+        return []
+    if not entity_list:
+        return []
+
+    # ---- Кластеры: одно bulk-чтение вместо чтения на каждое поле ----
+    # Окно считается из реальных оффсетов датаclass-а, ноль хардкода.
+    # Разброс > CLUSTER_MAX_SPREAD или поле недоступно - индивидуальные
+    # чтения (старый путь).
+    try:
+        pawn_lo = min(int(o.m_iHealth), int(o.m_lifeState), int(o.m_pGameSceneNode))
+        pawn_hi = max(int(o.m_iHealth), int(o.m_lifeState), int(o.m_pGameSceneNode)) + 8
+        pawn_cluster_ok = (pawn_hi - pawn_lo) <= CLUSTER_MAX_SPREAD
+        _off_health = int(o.m_iHealth) - pawn_lo
+        _off_life = int(o.m_lifeState) - pawn_lo
+        _off_gsn = int(o.m_pGameSceneNode) - pawn_lo
+    except Exception:
+        pawn_cluster_ok = False
+        pawn_lo = pawn_hi = 0
+        _off_health = _off_life = _off_gsn = 0
+
+    try:
+        ctrl_lo = min(int(o.m_hPlayerPawn), int(o.m_iTeamNum))
+        ctrl_hi = max(int(o.m_hPlayerPawn), int(o.m_iTeamNum)) + 4
+        ctrl_cluster_ok = (ctrl_hi - ctrl_lo) <= CLUSTER_MAX_SPREAD
+        _off_hpawn = int(o.m_hPlayerPawn) - ctrl_lo
+        _off_team = int(o.m_iTeamNum) - ctrl_lo
+    except Exception:
+        ctrl_cluster_ok = False
+        ctrl_lo = ctrl_hi = 0
+        _off_hpawn = _off_team = 0
+
+    # ---- Bulk-подготовка прохода ----
+    # Контроллеры слотов 0..63 живут в бакете 0 (i >> 9 == 0 для i < 64):
+    # list_entry - 1 чтение за проход вместо 64, массив указателей
+    # контроллеров - одним куском 64*112 байт. Сбой/короткое чтение -
+    # fallback на поштучные (старый путь).
+    list_entry = 0
+    ctrl_buf = None
+    try:
+        list_entry = memfuncs.ProcMemHandler.ReadPointer(proc, entity_list + ENT_IDENTITY)
+        if list_entry:
+            ctrl_buf = memfuncs.ProcMemHandler.ReadBytes(proc, list_entry, ENT_STRIDE * 64)
+            if not ctrl_buf or len(ctrl_buf) < ENT_STRIDE * 64:
+                ctrl_buf = None
+    except Exception:
+        ctrl_buf = None
 
     local_index = 0
     if opt_visible:
@@ -269,42 +483,73 @@ def _scan_once(st):
             local_index = 0
 
     out = []
+    _le2_cache = {}   # бакет -> list_entry павнов, кэш на проход
     for i in range(64):
         try:
-            list_entry = memfuncs.ProcMemHandler.ReadPointer(
-                proc, entity_list + (ENT_BUCKET_STEP * (i & HANDLE_SER_MASK) >> 9) + ENT_IDENTITY)
-            if not list_entry:
-                continue
-
-            controller = memfuncs.ProcMemHandler.ReadPointer(
-                proc, list_entry + ENT_STRIDE * (i & HANDLE_IDX_MASK))
+            # Контроллер: из bulk-массива прохода или поштучно (fallback)
+            if ctrl_buf is not None:
+                controller = struct.unpack_from('<Q', ctrl_buf, i * ENT_STRIDE)[0]
+            else:
+                if not list_entry:
+                    list_entry = memfuncs.ProcMemHandler.ReadPointer(
+                        proc, entity_list + ENT_IDENTITY)
+                    if not list_entry:
+                        continue
+                controller = memfuncs.ProcMemHandler.ReadPointer(
+                    proc, list_entry + ENT_STRIDE * i)
             if not controller or controller == local_controller:
                 continue
 
-            pawn_handle = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_hPlayerPawn)
+            # pawn_handle + team: кластер одним чтением
+            if ctrl_cluster_ok:
+                try:
+                    cbuf = memfuncs.ProcMemHandler.ReadBytes(proc, controller + ctrl_lo, ctrl_hi - ctrl_lo)
+                    pawn_handle = struct.unpack_from('<I', cbuf, _off_hpawn)[0]
+                    team = struct.unpack_from('<i', cbuf, _off_team)[0]
+                except Exception:
+                    pawn_handle = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_hPlayerPawn)
+                    team = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_iTeamNum)
+            else:
+                pawn_handle = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_hPlayerPawn)
+                team = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_iTeamNum)
             if not pawn_handle:
                 continue
 
-            list_entry2 = memfuncs.ProcMemHandler.ReadPointer(
-                proc, entity_list + ENT_BUCKET_STEP * ((pawn_handle & HANDLE_SER_MASK) >> 9) + ENT_IDENTITY)
-            if not list_entry2:
+            # Павн по handle: list_entry бакета кэшируется на проход
+            pidx = pawn_handle & HANDLE_SER_MASK
+            bucket = pidx >> 9
+            le2 = _le2_cache.get(bucket, 0)
+            if not le2:
+                le2 = memfuncs.ProcMemHandler.ReadPointer(
+                    proc, entity_list + ENT_BUCKET_STEP * bucket + ENT_IDENTITY)
+                _le2_cache[bucket] = le2 or 0
+            if not le2:
                 continue
-
             pawn = memfuncs.ProcMemHandler.ReadPointer(
-                proc, list_entry2 + ENT_STRIDE * (pawn_handle & HANDLE_IDX_MASK))
+                proc, le2 + ENT_STRIDE * (pidx & HANDLE_IDX_MASK))
             if not pawn or pawn == local_pawn:
                 continue
 
-            health = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_iHealth)
+            # health / lifeState / sceneNode: кластер одним чтением
+            if pawn_cluster_ok:
+                try:
+                    pbuf = memfuncs.ProcMemHandler.ReadBytes(proc, pawn + pawn_lo, pawn_hi - pawn_lo)
+                    health = struct.unpack_from('<i', pbuf, _off_health)[0]
+                    life_state = struct.unpack_from('<i', pbuf, _off_life)[0]
+                    scene_node = struct.unpack_from('<Q', pbuf, _off_gsn)[0]
+                except Exception:
+                    health = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_iHealth)
+                    life_state = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_lifeState)
+                    scene_node = memfuncs.ProcMemHandler.ReadPointer(proc, pawn + o.m_pGameSceneNode)
+            else:
+                health = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_iHealth)
+                life_state = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_lifeState)
+                scene_node = memfuncs.ProcMemHandler.ReadPointer(proc, pawn + o.m_pGameSceneNode)
+
             if health <= 0:
                 continue
-
-            team = memfuncs.ProcMemHandler.ReadInt(proc, controller + o.m_iTeamNum)
-            life_state = memfuncs.ProcMemHandler.ReadInt(proc, pawn + o.m_lifeState)
             if life_state != LIFESTATE_ALIVE or (opt_team_check and team == local_team):
                 continue
-
-            scene_node = memfuncs.ProcMemHandler.ReadPointer(proc, pawn + o.m_pGameSceneNode)
             if not scene_node:
                 continue
 
@@ -314,7 +559,7 @@ def _scan_once(st):
                 continue
 
             origin = memfuncs.ProcMemHandler.ReadVec(proc, pawn + o.m_vOldOrigin)
-            if origin is None:
+            if origin is None or _vec3_zero(origin):
                 continue
 
             dist = calculations.distance_vec3(origin, local_origin)
@@ -323,24 +568,22 @@ def _scan_once(st):
 
             # Bulk-кости: и head, и скелет, и кость-крепление трейсера - одним чтением
             head, bones, pelvis = _read_bones_bulk(proc, bone_matrix)
-            if head is None:
+            if head is None or _vec3_zero(head):
                 continue
-            if opt_skeleton and bones:
-                filtered = {}
-                for bname, wp in bones.items():
-                    if (abs(wp.x - origin.x) > 200 or abs(wp.y - origin.y) > 200
-                            or abs(wp.z - origin.z) > 200):
-                        continue
-                    filtered[bname] = wp
-                if len(filtered) >= 2:
-                    filtered["head"] = head
-                    bones = filtered
-                else:
-                    bones = None
-            elif not opt_skeleton:
+            if opt_skeleton:
+                bones = _filter_skeleton(bones, origin, head)
+            else:
                 bones = None
 
             name = _get_player_name(proc, controller, o) if opt_name else None
+
+            # Активное оружие: только когда текст включен, кэш по handle
+            weapon = None
+            if opt_weapon:
+                sch = noscopedot._get_schema()
+                widx = _read_active_weapon_idx(proc, entity_list, pawn, o, sch)
+                if widx is not None:
+                    weapon = _weapon_display_name(widx)
 
             visible = False
             if opt_visible:
@@ -360,6 +603,9 @@ def _scan_once(st):
                 name=name,
                 visible=visible,
                 dist=dist,
+                weapon=weapon,
+                pawn=pawn,
+                scene_node=scene_node,
             ))
         except Exception:
             continue
@@ -400,19 +646,25 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     _ensure_reader()
 
     if not _neron_has_focus():
+        # Намеренный одиночный end_drawing без пары begin: продаёт бэкбуфер
+        # и качает PollInputEvents, пока окно без фокуса. Проверено
+        # рантаймом; не "чинить" на begin+end без прямой причины.
         try:
             pme.end_drawing()
         except Exception:
             pass
         return
 
-    # Обновляем состояние для ридера; смена процесса - сброс кэша имён.
+    # Обновляем состояние для ридера; смена процесса - сброс кэшей
+    # (имена, оружие, кости: после рестарта игры хэндлы переиспользуются).
     if (_reader_state["proc"] is not processHandle
             or _reader_state["client"] != clientBaseAddress):
         _reader_state["proc"] = processHandle
         _reader_state["client"] = clientBaseAddress
         _reader_state["offsets"] = Offsets
         _name_cache.clear()
+        _wpn_idx_cache.clear()
+        _fresh_cache.clear()
     _reader_state["opts"] = Options
 
     opt_box = Options.get("EnableESPBoxRendering", False)
@@ -423,10 +675,15 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     opt_tracer = Options.get("EnableESPTracerRendering", False)
     opt_skeleton = Options.get("EnableESPSkeletonRendering", False)
     opt_visible_box = Options.get("ESP_VisibleCheckBox", False)
+    opt_weapon = Options.get("EnableESPWeaponText", False)
 
     if not bool(Options.get("EnableESP", True)):
         opt_box = opt_name = opt_distance = opt_health_text = False
         opt_health_bar = opt_tracer = opt_skeleton = opt_visible_box = False
+        opt_weapon = False
+
+    # Свежие кости в кадре нужны только когда их реально рисуем
+    need_fresh_bones = bool(opt_skeleton or opt_tracer)
 
     sync_skel = bool(Options.get("ESP_HealthSyncSkeleton", True))
     sync_bar = bool(Options.get("ESP_HealthSyncBar", True))
@@ -485,7 +742,8 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         pass
 
     # ===== NoScope-оверлей (крест при снятом скопе): ТОЛЬКО рисование =====
-    # Снятие скопа - целиком в fovchanger. zoomed: m_bIsScoped ИЛИ 0<FOV<89.
+    # Снятие скопа - целиком в fovchanger (там же гейт снайперок на снятие).
+    # zoomed: m_bIsScoped ИЛИ 0<FOV<89.
     try:
         if bool(Options.get("EnableNoScopeOverlay", False)):
             off = Offsets.offset
@@ -515,6 +773,24 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
                     except Exception:
                         pass
 
+            # Гейт снайперок: крест - только с AWP/SSG08/SCAR-20/G3SG1 в
+            # руках. AUG/SG553 держат нативный скоуп - крест поверх него
+            # не нужен. Схема/список - единые источники (noscopedot), чтение
+            # - та же калиброванная композиция, что у Weapon Text. Сбой
+            # чтения -> крест off, нативный прицел остаётся чистым.
+            if zoomed:
+                try:
+                    _entlist = memfuncs.ProcMemHandler.ReadPointer(
+                        processHandle, clientBaseAddress + off.dwEntityList)
+                    _widx = None
+                    if _entlist:
+                        _widx = _read_active_weapon_idx(
+                            processHandle, _entlist, lp, off, noscopedot._get_schema())
+                    if _widx is None or _widx not in noscopedot.SNIPER_ITEM_IDS:
+                        zoomed = False
+                except Exception:
+                    zoomed = False
+
             if zoomed:
                 sw2, sh2 = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
                 col = _col("#000000")
@@ -541,7 +817,7 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         except Exception:
             pass
         return
-
+        
     screen_w, screen_h = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
 
     try:
@@ -554,10 +830,25 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         pass
 
+    o_fresh = Offsets.offset
+
     for ent in ents:
         try:
+            # Свежие данные прямо в кадре; сбой -> снапшот (не мигаем)
             origin = ent.origin
             head = ent.head
+            bones = ent.bones
+            pelvis = ent.pelvis
+            f_origin, f_head, f_bones, f_pelvis = _fresh_draw_data(
+                processHandle, ent, o_fresh, need_fresh_bones)
+            if f_origin is not None:
+                origin = f_origin
+            if f_head is not None:
+                head = f_head
+            if f_bones is not None:
+                bones = f_bones
+            if f_pelvis is not None:
+                pelvis = f_pelvis
 
             sh = calculations.world_to_screen(view_matrix, head)
             sf = calculations.world_to_screen(view_matrix, origin)
@@ -570,7 +861,7 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
             # Трейсер ДО гейт-проверок границ: линия живёт и у заэкранных
             # противников. Крепление - кость 0 (таз).
             if opt_tracer:
-                tracer_w = ent.pelvis if ent.pelvis is not None else origin
+                tracer_w = pelvis if pelvis is not None else origin
                 tp = calculations.world_to_screen(view_matrix, tracer_w)
                 if tp is not None:
                     tcol = tracer_custom_col if tracer_custom else color_team
@@ -612,6 +903,10 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
                 draw_name(ent.name.strip(), info_x, info_cursor, color="#E8F1FF")
                 info_cursor += 14
 
+            if opt_weapon and ent.weapon:
+                draw_weapon(ent.weapon, info_x, info_cursor, color="#D9C9FF")
+                info_cursor += 14
+
             if opt_distance:
                 draw_distance(info_x, info_cursor, ent.dist, color="#A4B0C3")
                 info_cursor += 14
@@ -627,9 +922,13 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
                                 team_color=bar_team,
                                 color_from_hex=hp_hex)
 
-            if opt_skeleton and ent.bones:
+            if opt_skeleton and bones:
+                # Свежие кости проходят тот же фильтр мусора, что и снапшот
+                bones = _filter_skeleton(bones, origin, head)
+                if not bones:
+                    continue
                 bones2d = {}
-                for bn, wp in ent.bones.items():
+                for bn, wp in bones.items():
                     b2d = calculations.world_to_screen(view_matrix, wp)
                     if b2d is None:
                         continue
@@ -675,4 +974,3 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         pme.end_drawing()
     except Exception:
         pass
-# markers: END features/esp/core.py v5.1

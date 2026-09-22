@@ -1,6 +1,6 @@
+# markers: START features/noscopedot.py v2.3
 import os
 import json
-import time
 
 import globals
 from functions import memfuncs
@@ -39,9 +39,6 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 _schema = None
 _col_cache = {}
 _wpn_cache = {"h": -1, "idx": -1, "zl": -1}
-_hb_ts = 0.0
-_hb_count = 0
-_drawn_once = False
 
 
 def _get_schema():
@@ -160,10 +157,8 @@ def _weapon_index(proc, client_base, local_pawn, o, sch):
 
 def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
     """Точка ноускопа. Вызывается из ESP_Update внутри begin/end drawing."""
-    global _hb_ts, _hb_count, _drawn_once
     try:
-        opt_dot = bool(Options.get("EnableNoScopeDot", False))
-        if not opt_dot:
+        if not bool(Options.get("EnableNoScopeDot", False)):
             return
         o = Offsets.offset
 
@@ -204,51 +199,24 @@ def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
             except Exception:
                 pass
 
-        hb_extra = ""
-        widx = -1
         if lp and not zoomed and alive:
             sch = _get_schema()
-            missing = [f for (_c, f) in _SCHEMA_NEEDS if not sch.get(f)]
-            if missing:
-                hb_extra = " missing=" + ",".join(missing)
-            else:
-                res = _weapon_index(processHandle, clientBaseAddress, lp, o, sch)
-                if res is None:
-                    hb_extra = " step=no-ent"
-                else:
-                    widx, zl = res
-                    hb_extra = f" idx={widx} zl={zl}"
-
-        if widx in SNIPER_ITEM_IDS:
-            radius, opacity = _dot_params(Options)
-            base = _dot_color(Options.get("NoScopeDot_color", "#FFFFFF"))
-            try:
-                col = pme.fade_color(base, opacity)
-            except Exception:
-                col = base
-            pme.draw_circle(
-                int(globals.SCREEN_WIDTH // 2),
-                int(globals.SCREEN_HEIGHT // 2),
-                int(round(radius)),
-                color=col)
-            if not _drawn_once:
-                _drawn_once = True
-                print("[noscopedot] точка активна, диагностика выключена", flush=True)
-
-        # Диагностика: только пока точка ни разу не нарисована, максимум
-        # 12 строк за сессию - дальше молчит в любом случае.
-        if not _drawn_once and _hb_count < 12:
-            now = time.time()
-            if now - _hb_ts >= 5.0:
-                _hb_ts = now
-                _hb_count += 1
-                print(f"[noscopedot][hb] lp={bool(lp)} zoomed={zoomed} "
-                      f"alive={alive}{hb_extra}", flush=True)
-                if _hb_count >= 12:
-                    print("[noscopedot] диагностика исчерпана; если точки нет - "
-                          "пришли эти 12 строк", flush=True)
-    except Exception as e:
-        try:
-            print(f"[noscopedot][exc] {repr(e)}", flush=True)
-        except Exception:
-            pass
+            res = _weapon_index(processHandle, clientBaseAddress, lp, o, sch)
+            if res is not None:
+                widx, _zl = res
+                if widx in SNIPER_ITEM_IDS:
+                    radius, opacity = _dot_params(Options)
+                    base = _dot_color(Options.get("NoScopeDot_color", "#FFFFFF"))
+                    try:
+                        col = pme.fade_color(base, opacity)
+                    except Exception:
+                        col = base
+                    pme.draw_circle(
+                        int(globals.SCREEN_WIDTH // 2),
+                        int(globals.SCREEN_HEIGHT // 2),
+                        int(round(radius)),
+                        color=col)
+    except Exception:
+        # Фича подтверждена: молча не рвём кадр оверлея
+        pass
+# markers: END features/noscopedot.py v2.3
