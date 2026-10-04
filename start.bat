@@ -1,4 +1,5 @@
 @echo off
+set PYTHONDONTWRITEBYTECODE=1
 if exist "output" (
     rmdir /s /q "output" >nul 2>&1
 )

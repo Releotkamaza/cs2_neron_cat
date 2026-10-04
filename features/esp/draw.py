@@ -170,8 +170,12 @@ def draw_skeleton(bones, bone_connections, color, thickness=None, joint_radius=N
                 continue
             pme.draw_line(s.x, s.y, e.x, e.y, color=col, thick=thickness)
     try:
-        for _, pt in bones.items():
-            if pt.x >= 0 and pt.y >= 0:
+        conn_bones = set()
+        for s_name, e_name in bone_connections:
+            conn_bones.add(s_name)
+            conn_bones.add(e_name)
+        for bname, pt in bones.items():
+            if bname in conn_bones and pt.x >= 0 and pt.y >= 0:
                 pme.draw_circle(int(pt.x), int(pt.y), int(joint_radius), color=col)
     except Exception:
         pass

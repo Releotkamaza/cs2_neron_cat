@@ -3,12 +3,11 @@ from functions import memfuncs
 from functions import calculations
 import globals
 import pyMeow as pme
-from features import spectator
 from features import nosmoke as _ns_mod
 from features import noscopedot
+from . import static as static_layer   # v5.9: статичный слой (зрители, прицел)
 from .draw import (draw_box, draw_skeleton, draw_distance, draw_health_text,
                    draw_name, draw_health_bar, draw_weapon, draw_bomb_status_card)
-from .fonts import _find_overlay_font, _ensure_raylib_font, _get_overlay_font_handle
 from .colors import resolve_color, health_color_hex
 from .visibility import resolve_local_index, is_visible_to_local
 import threading
@@ -87,8 +86,11 @@ BONE_HEAD_FALLBACK = 7
 # чтение вместо чтения на каждое поле. НЕ оффсет, порог эвристики.
 CLUSTER_MAX_SPREAD = 1024
 
-# TTL свежей перечитки костей: игра обновляет анимацию со своей частотой
-FRESH_TTL_SEC = 0.007
+# TTL перечитки КОСТЕЙ: игра обновляет анимацию со своей частотой, кости
+# дорогие (bulk). Позиция (origin) в кэш не попадает - читается каждый
+# кадр синхронно с view matrix (см. _fresh_draw_data). v6.2: 0.007 -> 0.005
+# - голова/скелет свежее, меньше визуальное отставание от модели.
+FRESH_TTL_SEC = 0.005
 
 _fresh_cache = {}   # pawn -> (origin, head, bones, pelvis, ts)
 
@@ -114,12 +116,20 @@ _ELLIPSE_UNIT = [
 boneConnections = [
     ('neck', 'head'),
     ('neck', 'chest'),
-    ('chest', 'spine'), ('spine', 'lower_spine'), ('lower_spine', 'pelvis'),
-    ('chest', 'clavicle_L'), ('clavicle_L', 'arm_upper_L'), ('arm_upper_L', 'arm_lower_L'), ('arm_lower_L', 'hand_L'),
-    ('chest', 'clavicle_R'), ('clavicle_R', 'arm_upper_R'), ('arm_upper_R', 'arm_lower_R'), ('arm_lower_R', 'hand_R'),
+    ('chest', 'pelvis'),
+    ('chest', 'arm_upper_L'), ('arm_upper_L', 'arm_lower_L'), ('arm_lower_L', 'hand_L'),
+    ('chest', 'arm_upper_R'), ('arm_upper_R', 'arm_lower_R'), ('arm_lower_R', 'hand_R'),
     ('pelvis', 'leg_upper_L'), ('leg_upper_L', 'leg_lower_L'), ('leg_lower_L', 'ankle_L'),
     ('pelvis', 'leg_upper_R'), ('leg_upper_R', 'leg_lower_R'), ('leg_lower_R', 'ankle_R'),
 ]
+
+# Только кости, реально участвующие в отрисовке скелета: всё остальное из
+# PLAYER_BONES (spine/lower_spine/clavicle_*) не распаковывается в словарь
+# bones и не идёт дальше (фильтр в _read_bones_bulk). Само чтение памяти -
+# единый сплошной блок 27*32 байт одной операцией ReadBytes (дешевле, чем
+# читать по одной кости; неиспользуемые индексы сидят внутри блока между
+# используемыми и их выкинуть из чтения физически нельзя).
+_CONNECTED_BONES = {n for pair in boneConnections for n in pair}
 
 
 def _head_from(eye_l, eye_r, neck, fallback):
@@ -172,6 +182,10 @@ def _read_bones_bulk(processHandle, bone_matrix):
     for bname, bidx in PLAYER_BONES.items():
         if bname == "eye_L" or bname == "eye_R":
             continue
+        if bname not in _CONNECTED_BONES:
+            # неиспользуемые кости скелета (spine/lower_spine/clavicle_*)
+            # не распаковываем - не идут в отрисовку и в кэш
+            continue
         bones[bname] = bone(bidx)
     return head, bones, pelvis
 
@@ -193,42 +207,139 @@ def _filter_skeleton(bones, origin, head):
     return None
 
 
-def _fresh_draw_data(processHandle, ent, o, want_bones):
-    """Свежие origin/кости ПРЯМО в кадре рендера, TTL-кэш по pawn:
-    рендер не чаще игры перечитывает одни и те же кости. Сбой чтения ->
-    None-поля: рисуем по снапшоту, энтити не мигает. want_bones=False -
-    только origin (кости не рисуем)."""
+def _read_origin(processHandle, pawn, scene_node, o):
+    """Позиция для отрисовки: интерполированная клиентом m_vecAbsOrigin
+    (scene_node) - совпадает с моделью в кадре, а не с сырым тиком
+    сервера. Фоллбэк на m_vOldOrigin (сырая серверная позиция) при
+    нуле/сбое: энтити не мигает, отставание не растёт."""
+    if scene_node and o.m_vecAbsOrigin:
+        try:
+            origin = memfuncs.ProcMemHandler.ReadVec(processHandle, scene_node + o.m_vecAbsOrigin)
+            if origin is not None and not _vec3_zero(origin):
+                return origin
+        except Exception:
+            pass
+    try:
+        origin = memfuncs.ProcMemHandler.ReadVec(processHandle, pawn + o.m_vOldOrigin)
+        if origin is not None and not _vec3_zero(origin):
+            return origin
+    except Exception:
+        pass
+    return None
+
+
+# Экстраполяция рисуемой геометрии вперёд по скорости: even интерполиро-
+# ванный абсОриджин обновляется тиками (64 Гц -> ~15.6 мс) + сетевая
+# задержка клиента, поэтому бокс/скелет визуально отстают от модели.
+# Кламп по модулю: на резких остановках не улетаем сквозь стены.
+# v6.2: период настраивается из GUI ("ESP_ExtrapolateMs", мс) - глобал
+# перевыставляется каждый кадр до цикла отрисовки (см. ESP_Update).
+# v6.4: сдвиг сглаживается EMA (SHIFT_SMOOTH_TAU ~1 тик): m_vecVelocity
+# тиковая (64 Гц) - сырое vel*ms давало ступеньки-рывки ESP на каждом
+# тике и «ушла плавность» (жалоба живого теста v6.3, 80 мс).
+# v6.5: ДЕФОЛТ 0 (выключено). Живой тест: экстраполяция даёт перелёт
+# в упоре (60 мс * 250 ю/с = 15 ю при дистанции 50-100 ю = треть экрана:
+# «скелет улетает вперёд на модельку при стрейфе») и НЕ убирает хвост
+# вдали. Отличия от стабильной были «незначительны и негативны» ->
+# возврат к поведению стабильной (без сдвига), польза остаётся только
+# от свежего чтения origin/костей в кадре. Слайдер оставлен (0..200).
+EXTRAPOLATE_SEC = 0.05           # исторический дефолт (документация)
+EXTRAPOLATE_MAX_SHIFT = 32.0     # потолок сдвига в юнитах
+SHIFT_SMOOTH_TAU = 0.016         # постоянная времени EMA (~1 тик 64 Гц)
+_EXTRAPOLATE_MS = 0              # текущее значение из Options (кадр)
+_shift_smooth_cache = {}         # pawn -> (сглаженный сдвиг, ts)
+
+
+def _extrapolate_shift(processHandle, pawn, o):
+    """Vector3-сдвиг (или None), который надо прибавить КО ВСЕМ точкам
+    геометрии (origin/кости/голова/таз), чтобы ESP совпал с моделью
+    на экране. Сдвиг - суммарно, чтобы бокс и скелет не разъезжались.
+    v6.4: результат пропускается через EMA - даже нулевая скорость
+    плавно схлопывает сдвиг (цель остановилась), а не дёргает бокс."""
+    if not o.m_vecVelocity:
+        return None
+    try:
+        vel = memfuncs.ProcMemHandler.ReadVec(processHandle, pawn + o.m_vecVelocity)
+    except Exception:
+        return None
+    if vel is None:
+        return None
+    raw = vel * (_EXTRAPOLATE_MS / 1000.0)
+    length = (raw.x * raw.x + raw.y * raw.y + raw.z * raw.z) ** 0.5
+    if length > EXTRAPOLATE_MAX_SHIFT and length > 0.0:
+        k = EXTRAPOLATE_MAX_SHIFT / length
+        raw = Vector3(raw.x * k, raw.y * k, raw.z * k)
     now = time.time()
+    if len(_shift_smooth_cache) > 256:
+        _shift_smooth_cache.clear()
+    prev = _shift_smooth_cache.get(pawn)
+    if prev is None:
+        _shift_smooth_cache[pawn] = (raw, now)
+        return raw
+    pshift, pts = prev
+    dt = now - pts
+    if dt <= 0.0 or dt > 0.5:  # сбой времени/долгая пауза: пересоздать
+        _shift_smooth_cache[pawn] = (raw, now)
+        return raw
+    alpha = 1.0 - _m.exp(-dt / SHIFT_SMOOTH_TAU)
+    s = Vector3(pshift.x + (raw.x - pshift.x) * alpha,
+                pshift.y + (raw.y - pshift.y) * alpha,
+                pshift.z + (raw.z - pshift.z) * alpha)
+    _shift_smooth_cache[pawn] = (s, now)
+    return s
+
+
+def _shift_pt(pt, shift):
+    if pt is None or shift is None:
+        return pt
+    return pt + shift
+
+
+def _shift_bones(bones, shift):
+    if not bones or shift is None:
+        return bones
+    return {k: v + shift for k, v in bones.items()}
+
+
+def _fresh_draw_data(processHandle, ent, o, want_bones):
+    """Свежие origin/кости ПРЯМО в кадре рендера. origin читается КАЖДЫЙ
+    кадр (одно дешёвое чтение, кэш ему только мешал бы), дорогие кости -
+    по TTL-кэшу (рендер не чаще игры перечитывает анимацию). Сбой
+    чтения -> None-поля: рисуем по снапшоту, энтити не мигает.
+    want_bones=False - только origin (кости не рисуем)."""
+    now = time.time()
+    origin = _read_origin(processHandle, ent.pawn, ent.scene_node, o)
+    if origin is None:
+        return None, None, None, None
+    raw_origin = origin
+    shift = _extrapolate_shift(processHandle, ent.pawn, o)
+    origin = _shift_pt(origin, shift)
+    if not want_bones or not ent.scene_node:
+        return origin, None, None, None
     cached = _fresh_cache.get(ent.pawn)
     if cached is not None:
         c_origin, c_head, c_bones, c_pelvis, ts = cached
         if now - ts < FRESH_TTL_SEC:
-            if want_bones:
-                return c_origin, c_head, c_bones, c_pelvis
-            return c_origin, None, None, None
+            # origin свежий из только что прочитанного (со сдвигом),
+            # кости из кэша сырые - сдвигаем и их тоже (тот же shift).
+            return origin, _shift_pt(c_head, shift), _shift_bones(c_bones, shift), _shift_pt(c_pelvis, shift)
     try:
-        origin = memfuncs.ProcMemHandler.ReadVec(processHandle, ent.pawn + o.m_vOldOrigin)
-        if origin is None or _vec3_zero(origin):
-            return None, None, None, None
-        if not want_bones or not ent.scene_node:
-            result = (origin, None, None, None)
-        else:
-            try:
-                bm = memfuncs.ProcMemHandler.ReadPointer(
-                    processHandle, ent.scene_node + o.m_modelState + BONE_ARRAY_OFF)
-                if not bm:
-                    result = (origin, None, None, None)
-                else:
-                    head, bones, pelvis = _read_bones_bulk(processHandle, bm)
-                    result = (origin, head, bones, pelvis)
-            except Exception:
-                result = (origin, None, None, None)
+        bm = memfuncs.ProcMemHandler.ReadPointer(
+            processHandle, ent.scene_node + o.m_modelState + BONE_ARRAY_OFF)
+        if not bm:
+            return origin, None, None, None
+        head, bones, pelvis = _read_bones_bulk(processHandle, bm)
         if len(_fresh_cache) > 128:
             _fresh_cache.clear()
-        _fresh_cache[ent.pawn] = result + (now,)
-        return result
+        # Кэш храним СЫРЫМ (без сдвига): сдвиг зависит от текущей скорости
+        # кадра, а не от момента чтения костей.
+        _fresh_cache[ent.pawn] = (raw_origin, head, bones, pelvis, now)
+        head = _shift_pt(head, shift)
+        pelvis = _shift_pt(pelvis, shift)
+        bones = _shift_bones(bones, shift)
+        return origin, head, bones, pelvis
     except Exception:
-        return None, None, None, None
+        return origin, None, None, None
 
 _last_focus_check = 0.0
 _last_focus_result = False
@@ -558,8 +669,8 @@ def _scan_once(st):
             if not bone_matrix:
                 continue
 
-            origin = memfuncs.ProcMemHandler.ReadVec(proc, pawn + o.m_vOldOrigin)
-            if origin is None or _vec3_zero(origin):
+            origin = _read_origin(proc, pawn, scene_node, o)
+            if origin is None:
                 continue
 
             dist = calculations.distance_vec3(origin, local_origin)
@@ -636,13 +747,7 @@ def _ensure_reader():
         _reader_thread.start()
 
 
-_spec_cache = []
-_spec_last_read = 0.0
-
-
 def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombState, SharedRuntime=None):
-    global _spec_cache, _spec_last_read
-
     _ensure_reader()
 
     if not _neron_has_focus():
@@ -707,6 +812,21 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         tracer_thick = 1.5
     tracer_thick = max(0.5, min(4.0, tracer_thick))
 
+    # v6.2: период экстраполяции ESP из GUI (мс), кламп 0..150. Глобал
+    # читается _extrapolate_shift уже внутри кадра. 0 = выключено.
+    # v6.3: дефолт 50 -> 80 и кламп 0..200. Живой тест в матче: бокс и
+    # скелет отставали от моделей (~тик 15.6мс + пинг + кадр), 50 мс
+    # не хватало; трейсеры отставали меньше (менее чувствительны).
+    # v6.5: дефолт 0 - экстраполяция выключена (см. константы выше).
+    # Живой тест показал перелёт в упоре и «отличия незначительны и
+    # негативны»; слайдер оставлен для ручной подстройки (0..200).
+    global _EXTRAPOLATE_MS
+    try:
+        _EXTRAPOLATE_MS = int(float(Options.get("ESP_ExtrapolateMs", 0) or 0))
+    except Exception:
+        _EXTRAPOLATE_MS = 0
+    _EXTRAPOLATE_MS = max(0, min(200, _EXTRAPOLATE_MS))
+
     with _snap_lock:
         ents = _snapshot
 
@@ -715,29 +835,10 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         return
 
-    font_path = _find_overlay_font()
-    font_id = _ensure_raylib_font()
-    font_handle = _get_overlay_font_handle(16)
-
+    # ===== Панель зрителей (статично: Runtime читается раз в 0.2 c) =====
+    # v5.9: вынесено в features/esp/static.py.
     try:
-        now_spec = time.time()
-        if SharedRuntime is not None and (now_spec - _spec_last_read) >= 0.5:
-            _spec_last_read = now_spec
-            try:
-                _spec_cache = list(SharedRuntime.spectators)
-            except Exception:
-                _spec_cache = []
-
-        spectator.render_spectator_block(
-            pme,
-            _spec_cache,
-            enabled=Options.get("EnableShowSpectators", True),
-            screen_size=(globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT),
-            font_path=font_path,
-            font_id=font_id,
-            font_handle=font_handle,
-            font_size=16,
-        )
+        static_layer.render_spectators(pme, Options, SharedRuntime)
     except Exception:
         pass
 
@@ -799,9 +900,18 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         pass
 
-    # Точка ноускопа: вся логика в features/noscopedot.py
+    # Точка ноускопа: статичный слой (features/esp/static.py): параметры
+    # (цвет/радиус/прозрачность) кэшируются, только наличие по таймеру.
     try:
-        noscopedot.draw(processHandle, clientBaseAddress, Offsets, Options, pme)
+        static_layer.render_noscopedot(pme, processHandle, clientBaseAddress, Offsets, Options)
+    except Exception:
+        pass
+
+    # v5.9: кастомный прицел - статичный слой (features/esp/static.py):
+    # геометрия кэшируется и читается только при открытом окне чита.
+    # Живые гейты (зум/алив) draw_cfg проверяет каждый кадр сам.
+    try:
+        static_layer.render_crosshair(pme, processHandle, clientBaseAddress, Offsets, Options)
     except Exception:
         pass
 

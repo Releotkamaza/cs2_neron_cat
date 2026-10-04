@@ -1,9 +1,9 @@
-# markers: START features/noscopedot.py v2.3
 import os
 import json
 
 import globals
 from functions import memfuncs
+from functions import calculations
 
 try:
     from features.esp.colors import resolve_color
@@ -86,21 +86,6 @@ def _dot_color(hexstr):
     return result
 
 
-def _dot_params(Options):
-    """(radius_px, opacity_01) из настроек с клампом."""
-    try:
-        radius = float(Options.get("NoScopeDot_radius", 5.0))
-    except Exception:
-        radius = 5.0
-    radius = max(RADIUS_MIN, min(RADIUS_MAX, radius))
-    try:
-        opacity = int(Options.get("NoScopeDot_opacity", 80))
-    except Exception:
-        opacity = 80
-    opacity = max(OPACITY_MIN, min(OPACITY_MAX, opacity)) / 100.0
-    return (radius, opacity)
-
-
 def _weapon_index(proc, client_base, local_pawn, o, sch):
     """(idx, zl) активного оружия. ent по handle-пути (конвенция
     ESP-сканера), индекс - uint16 по каноничной вложенной композиции
@@ -155,10 +140,57 @@ def _weapon_index(proc, client_base, local_pawn, o, sch):
         return None
 
 
-def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
-    """Точка ноускопа. Вызывается из ESP_Update внутри begin/end drawing."""
+def build_cfg(Options):
+    """Кэшируемые параметры точки (цвет/прозрачность/радиус/наличие).
+    Как и у кастомного прицела: эти значения меняются ТОЛЬКО из окна чита,
+    поэтому читаются редко (static.py) — не каждый кадр. Наличие может
+    дёргаться хоткеем вне GUI — оно обновляется по таймеру отдельно."""
     try:
-        if not bool(Options.get("EnableNoScopeDot", False)):
+        radius = float(Options.get("NoScopeDot_radius", 5.0))
+    except Exception:
+        radius = 5.0
+    radius = max(RADIUS_MIN, min(RADIUS_MAX, radius))
+    try:
+        opacity = int(Options.get("NoScopeDot_opacity", 80))
+    except Exception:
+        opacity = 80
+    opacity = max(OPACITY_MIN, min(OPACITY_MAX, opacity)) / 100.0
+    try:
+        color = Options.get("NoScopeDot_color", "#FFFFFF") or "#FFFFFF"
+    except Exception:
+        color = "#FFFFFF"
+    return {
+        "enabled": bool(Options.get("EnableNoScopeDot", False)),
+        "radius": radius,
+        "opacity": opacity,
+        "color": _dot_color(color),
+    }
+
+
+def refresh_flags(cfg, Options):
+    """Обновить в cfg только наличие (enabled) — его могут дёргать хоткеи
+    вне GUI. Геометрия (цвет/радиус/прозрачность) не трогается: вне
+    открытого окна она не меняется."""
+    try:
+        cfg["enabled"] = bool(Options.get("EnableNoScopeDot", False))
+    except Exception:
+        pass
+    return cfg
+
+
+def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
+    """Обратная совместимость: чтение настроек каждый кадр + рисование.
+    Рендер-цикл больше не зовёт (статичный слой кэширует через
+    build_cfg/refresh_flags/draw_cfg); сохранено для внешних вызовов."""
+    draw_cfg(pme, processHandle, clientBaseAddress, Offsets, build_cfg(Options))
+
+
+def draw_cfg(pme, processHandle, clientBaseAddress, Offsets, cfg):
+    """Точка ноускопа по КЭШИРОВАННОЙ конфигурации (cfg). Живые гейты
+    (зум/жив/оружие) проверяются здесь каждый кадр: это игровое состояние,
+    а не настройки. Выключен -> нулевая цена (один выход)."""
+    try:
+        if not cfg.get("enabled"):
             return
         o = Offsets.offset
 
@@ -205,18 +237,14 @@ def draw(processHandle, clientBaseAddress, Offsets, Options, pme):
             if res is not None:
                 widx, _zl = res
                 if widx in SNIPER_ITEM_IDS:
-                    radius, opacity = _dot_params(Options)
-                    base = _dot_color(Options.get("NoScopeDot_color", "#FFFFFF"))
                     try:
-                        col = pme.fade_color(base, opacity)
+                        col = pme.fade_color(cfg["color"], cfg["opacity"])
                     except Exception:
-                        col = base
-                    pme.draw_circle(
-                        int(globals.SCREEN_WIDTH // 2),
-                        int(globals.SCREEN_HEIGHT // 2),
-                        int(round(radius)),
-                        color=col)
+                        col = cfg["color"]
+                    _ncx, _ncy = calculations.native_crosshair_center()
+                    pme.draw_circle(int(_ncx), int(_ncy),
+                                    int(round(cfg["radius"])), color=col)
+
     except Exception:
         # Фича подтверждена: молча не рвём кадр оверлея
         pass
-# markers: END features/noscopedot.py v2.3

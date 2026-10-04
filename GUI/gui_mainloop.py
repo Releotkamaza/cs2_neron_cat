@@ -834,6 +834,848 @@ class NERON_GUI:
             dpg.add_spacer(height=10, parent=container)
             content = dpg.add_group(parent=container)
         return content
+import dearpygui.dearpygui as dpg
+from functions import logutil
+from functions import toggle_registry
+from functions.config_manager import ConfigManager, apply_profile, sanitize_name
+import threading
+import time
+import win32api
+import os
+from functions import fontpaths
+
+ROOT_TAG = "neron_root_window"
+
+KeyNames = [
+    "OFF  ",  "VK_LBUTTON  ",  "VK_RBUTTON  ",  "VK_CANCEL  ",  "VK_MBUTTON  ",  "VK_XBUTTON1  ",  "VK_XBUTTON2  ",  "Unknown  ",
+    "VK_BACK  ",  "VK_TAB  ",  "Unknown  ",  "Unknown  ",  "VK_CLEAR  ",  "VK_RETURN  ",  "Unknown  ",  "Unknown  ",  "VK_SHIFT  ",  "VK_CONTROL  ",  "VK_MENU  ",
+    "VK_PAUSE  ",  "VK_CAPITAL  ",  "VK_KANA  ",  "Unknown  ",  "VK_JUNJA  ",  "VK_FINAL  ",  "VK_KANJI  ",  "Unknown  ",  "VK_ESCAPE  ",  "VK_CONVERT  ",
+    "VK_NONCONVERT  ",  "VK_ACCEPT  ",  "VK_MODECHANGE  ",  "VK_SPACE  ",  "VK_PRIOR  ",  "VK_NEXT  ",  "VK_END  ",  "VK_HOME  ",  "VK_LEFT  ",  "VK_UP  ",
+    "VK_RIGHT  ",  "VK_DOWN  ",  "VK_SELECT  ",  "VK_PRINT  ",  "VK_EXECUTE  ",  "VK_SNAPSHOT  ",  "VK_INSERT  ",  "VK_DELETE  ",  "VK_HELP  ",
+    "0  ",  "1  ",  "2  ",  "3  ",  "4  ",  "5  ",  "6  ",  "7  ",  "8  ",  "9  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "A  ",  "B  ",  "C  ",  "D  ",  "E  ",  "F  ",  "G  ",  "H  ",  "I  ",  "J  ",  "K  ",  "L  ",  "M  ",  "N  ",  "O  ",  "P  ",  "Q  ",  "R  ",  "S  ",  "T  ",  "U  ",  "V  ",  "W  ",  "X  ",  "Y  ",  "Z  ",
+    "VK_LWIN  ",  "VK_RWIN  ",  "VK_APPS  ",  "Unknown  ",  "VK_SLEEP  ",
+    "VK_NUMPAD0  ",  "VK_NUMPAD1  ",  "VK_NUMPAD2  ",  "VK_NUMPAD3  ",  "VK_NUMPAD4  ",  "VK_NUMPAD5  ",  "VK_NUMPAD6  ",  "VK_NUMPAD7  ",  "VK_NUMPAD8  ",  "VK_NUMPAD9  ",
+    "VK_MULTIPLY  ",  "VK_ADD  ",  "VK_SEPARATOR  ",  "VK_SUBTRACT  ",  "VK_DECIMAL  ",  "VK_DIVIDE  ",
+    "VK_F1  ",  "VK_F2  ",  "VK_F3  ",  "VK_F4  ",  "VK_F5  ",  "VK_F6  ",  "VK_F7  ",  "VK_F8  ",  "VK_F9  ",  "VK_F10  ",  "VK_F11  ",  "VK_F12  ",
+    "VK_F13  ",  "VK_F14  ",  "VK_F15  ",  "VK_F16  ",  "VK_F17  ",  "VK_F18  ",  "VK_F19  ",  "VK_F20  ",  "VK_F21  ",  "VK_F22  ",  "VK_F23  ",  "VK_F24  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "VK_NUMLOCK  ",  "VK_SCROLL  ",
+    "VK_OEM_NEC_EQUAL  ",  "VK_OEM_FJ_MASSHOU  ",  "VK_OEM_FJ_TOUROKU  ",  "VK_OEM_FJ_LOYA  ",  "VK_OEM_FJ_ROYA  ",
+    "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",  "Unknown  ",
+    "VK_LSHIFT  ",  "VK_RSHIFT  ",  "VK_LCONTROL  ",  "VK_RCONTROL  ",  "VK_LMENU  ",  "VK_RMENU  "
+]
+
+
+class NERON_GUI:
+    def __init__(self, config, runtime, flags=None):
+        self.runtime = runtime
+        self.flags = flags
+        self.n = 0
+        self.ui_dragging = False
+        self.viewport_width = 900
+        self.viewport_height = 780
+        self.root_window = None
+        self._esp_master_cb = None
+        self._trigger_enable_cb = None
+        self.sep_theme = None
+        self.bg_dl = None
+        self.frames_dl = None
+        self._frame_items = []      # (item, tab) - рамка принадлежит вкладке
+        self._frame_sig = None
+        self._tab_bar_id = None
+        self._tab_tags = set()
+        self._tab_by_label = {}
+        self._active_tab = None
+        self._cur_tab = None
+        # Тогглы: реестр -> hover-попапы и sync галочек с хоткеями движка
+        self._toggle_labels = dict(toggle_registry.TOGGLE_FEATURES)
+        self._hover_rows = []       # (item_id, config_key, label)
+        self._sync_tags = {}        # config_key -> checkbox item_id
+        self._hover_popup = None
+        self._hover_open_key = None
+        self._hover_current_key = None
+        self._hover_linger = 0.0
+        # Захват клавиши бинда: поток только фиксирует код, DPG трогает
+        # только GUI-цикл (_process_capture). Вызовы DPG из потока в ручном
+        # цикле рендера не применялись - бинд терялся.
+        self._capture_sender = None
+        self._capture_key_id = None
+        self._capture_done = None
+        self._capture_busy = False
+        # Троттлинг _sync_external: IPC-чтения из Manager не чаще 10 раз/сек,
+        # а не на каждый кадр (тот же урок, что с Manager.Namespace в воркерах)
+        self._sync_interval = 0.1
+        self._sync_last_ts = 0.0
+        # Профили конфигов: менеджер файлов cfg/ внутри GUI-процесса
+        self.cfgmgr = ConfigManager()
+        self._cfg_tab = None
+        self._cfg_name_input = None
+        self._cfg_status = None
+        self._cfg_list_group = None
+        self._cfg_list_sig = None
+        self._cfg_list_ts = 0.0
+        self._force_cfg_refresh = False
+        # Реестр config-виджетов: item -> (key, type, default, extra).
+        # Полная перерисовка (_sync_all_widgets) при смене config_ts -
+        # загрузка профиля должна обновлять слайдеры/пикеры/комбо, а не
+        # только галочки тогглов.
+        self._widget_reg = {}
+        self._hotkey_btns = {}          # button item -> config key
+        self._color_element_pickers = {}  # picker item -> (cb_key, color_key, default_hex)
+        self._last_config_ts = 0.0
+        # Вкладка "Прицел": drawlist'ы превью (создаются в _build_tab_crosshair)
+        self._xc_preview_dl = None
+        self._dot_preview_dl = None
+        self.config = config
+        self.control_width = 250
+        self.card_padding = 3
+        self.palette = {
+            "bg_top": (44, 26, 84),
+            "bg_bottom": (0, 0, 0),
+            "panel": (21, 15, 37, 255),
+            "frame": (32, 24, 54, 255),
+            "frame_hover": (76, 48, 132, 170),
+            "frame_active": (150, 40, 62, 255),
+            "accent": (150, 92, 255, 255),
+            "accent_hover": (176, 126, 255, 255),
+            "accent_soft": (88, 56, 150, 210),
+            "accent_red": (210, 52, 74, 255),
+            "card_title": (236, 64, 88, 255),
+            "red_border": (236, 64, 88, 255),
+            "red_sep": (150, 44, 64, 150),
+            "separator": (52, 40, 88, 200),
+            "text_muted": (176, 164, 208, 255),
+            "text_subtle": (128, 118, 158, 255),
+        }
+        self.init_context()
+        self.create_theme()
+        self.load_ui_font()
+        self.build_ui()
+        self.add_event_handlers()
+
+    def hex_to_rgb(self, hex_code):
+        hex_code = hex_code.lstrip('#')
+        return tuple(int(hex_code[i:i+2], 16) for i in (0, 2, 4))
+
+    def rgb_to_hex(self, rgb):
+        r, g, b = [int(round(x)) for x in rgb[:3]]
+        r = max(0, min(255, r))
+        g = max(0, min(255, g))
+        b = max(0, min(255, b))
+        return '#{:02X}{:02X}{:02X}'.format(r, g, b)
+
+    def _color_value_to_hex(self, value):
+        if not isinstance(value, (list, tuple)) or len(value) < 3:
+            return None
+        try:
+            rgb = [float(v) for v in value[:3]]
+        except (TypeError, ValueError):
+            return None
+        if max(rgb, default=0.0) <= 1.0:
+            rgb = [v * 255.0 for v in rgb]
+        return self.rgb_to_hex(rgb)
+
+    def init_context(self):
+        dpg.create_context()
+        self.viewport = dpg.create_viewport(
+            title="NERON",
+            width=self.viewport_width,
+            height=self.viewport_height,
+            vsync=True,
+            decorated=False,
+            resizable=False,
+            max_width=self.viewport_width,
+            max_height=self.viewport_height
+        )
+        dpg.setup_dearpygui()
+
+    def load_ui_font(self, path=None, size=16):
+        """Load and bind the custom UI font. Tries multiple fallback paths."""
+        self.ui_font = None
+        candidates = []
+        if path:
+            candidates.append(path)
+        base_dir = os.path.dirname(__file__)
+        repo_dir = os.path.abspath(os.path.join(base_dir, ".."))
+        font_name = "inter-semibold.ttf"
+        candidates.extend(
+            fontpaths.font_candidates(
+                font_filename=font_name,
+                anchors=[base_dir, repo_dir],
+            )
+        )
+        seen = set()
+        candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+        try:
+            with dpg.font_registry():
+                for cand in candidates:
+                    try:
+                        if os.path.exists(cand):
+                            self.ui_font = dpg.add_font(cand, size)
+                            logutil.debug(f"[gui] UI font loaded: {cand} (size={size})")
+                            break
+                    except Exception as e:
+                        logutil.debug(f"[gui] font load failed for {cand}: {e}")
+                        continue
+        except Exception as e:
+            logutil.debug(f"[gui] font registry error: {e}")
+            self.ui_font = None
+
+        if self.ui_font:
+            try:
+                dpg.bind_font(self.ui_font)
+            except Exception as e:
+                logutil.debug(f"[gui] bind_font failed: {e}")
+        else:
+            logutil.debug("[gui] No custom font found; using DearPyGui default font.")
+
+    def keybind_use(self, sender, app_data, user_data):
+        # Один захват за раз; повторный клик по любой кнопке-бинду игнор.
+        # user_data: строка-ключ (в настройки) или ("cfgbind", имя) (в _binds.json).
+        if self._capture_busy:
+            return
+        key_id = user_data
+        if not key_id:
+            return
+        self._capture_busy = True
+        self._capture_sender = sender
+        self._capture_key_id = key_id
+        try:
+            dpg.set_item_label(sender, "...")
+        except Exception:
+            pass
+        # Флаг для движков: биндимая клавиша не дёргает фичу/профиль.
+        try:
+            self.flags["capture"] = True
+        except Exception:
+            pass
+
+        def capture_key():
+            code = 0
+            try:
+                time.sleep(0.2)  # ждём отпускания ЛКМ от клика по кнопке
+                while True:
+                    for i in range(1, 256):
+                        if win32api.GetAsyncKeyState(i) & 0x8000:
+                            code = i
+                            break
+                    if code:
+                        break
+                    time.sleep(0.01)
+            finally:
+                self._capture_done = (key_id, code)
+
+        threading.Thread(target=capture_key, daemon=True).start()
+
+    def _process_capture(self):
+        """Завершение захвата клавиши - ТОЛЬКО в GUI-потоке: лейбл и запись
+        в конфиг/_binds.json. Поток захвата результат только фиксирует,
+        DPG не трогает."""
+        if self._capture_done is None:
+            return
+        key_id, code = self._capture_done
+        self._capture_done = None
+        try:
+            self.flags["capture"] = False
+        except Exception:
+            pass
+        if isinstance(key_id, tuple) and len(key_id) == 2 and key_id[0] == "cfgbind":
+            cfg_name = key_id[1]
+            vk = code if code > 0 else 0
+            try:
+                self.cfgmgr.set_bind(cfg_name, vk)
+                # Дубликаты: одна клавиша - один профиль.
+                if vk > 0:
+                    for other, ovk in self.cfgmgr.all_binds().items():
+                        if other != cfg_name and ovk == vk:
+                            self.cfgmgr.set_bind(other, 0)
+            except Exception as e:
+                logutil.debug(f"[gui] cfg bind '{cfg_name}' failed: {e}")
+            label = self._key_label(vk) if vk > 0 else self._key_label(0)
+            self._cfg_set_status(f"Бинд: {cfg_name} -> {label.strip() if vk > 0 else 'OFF'}")
+            self._force_cfg_refresh = True
+        else:
+            if code > 0:
+                self._config_set(key_id, code)
+                label = self._key_label(code)
+            else:
+                label = self._key_label(self._config_get(key_id, 0))
+        try:
+            dpg.set_item_label(self._capture_sender, label)
+        except Exception:
+            pass
+        self._capture_sender = None
+        self._capture_key_id = None
+        self._capture_busy = False
+
+    def _key_label(self, key_code):
+        if 0 <= key_code < len(KeyNames):
+            return KeyNames[key_code]
+        return f"Unknown({key_code})"
+
+    def _config_get(self, key, default=None):
+        try:
+            return self.config[key]
+        except KeyError:
+            pass
+        except Exception:
+            pass
+        try:
+            return self.config.get(key, default)
+        except Exception:
+            return default
+
+    def _config_set(self, key, value):
+        try:
+            self.config.update({key: value})
+        except Exception:
+            try:
+                self.config[key] = value
+            except Exception as e:
+                logutil.debug(f"[gui] config set failed for {key}: {e}")
+
+    def create_theme(self):
+        with dpg.theme() as theme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (245, 242, 252, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TextDisabled, self.palette["text_subtle"])
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (0, 0, 0, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (0, 0, 0, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_PopupBg, self.palette["panel"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, self.palette["separator"])
+                dpg.add_theme_color(dpg.mvThemeCol_BorderShadow, (0, 0, 0, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, self.palette["frame"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, self.palette["frame_hover"])
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, self.palette["frame_active"])
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (18, 12, 32, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (26, 17, 46, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgCollapsed, (18, 12, 32, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_CheckMark, self.palette["accent"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, self.palette["accent"])
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrabActive, self.palette["accent_red"])
+                dpg.add_theme_color(dpg.mvThemeCol_Button, self.palette["frame"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, self.palette["accent_soft"])
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, self.palette["accent"])
+                dpg.add_theme_color(dpg.mvThemeCol_Header, (21, 15, 37, 200))
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, self.palette["accent_soft"])
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, self.palette["accent"])
+                dpg.add_theme_color(dpg.mvThemeCol_Separator, self.palette["separator"])
+                dpg.add_theme_color(dpg.mvThemeCol_Tab, (21, 15, 37, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TabHovered, self.palette["accent_soft"])
+                dpg.add_theme_color(dpg.mvThemeCol_TabActive, self.palette["accent"])
+                dpg.add_theme_color(dpg.mvThemeCol_TabUnfocused, (21, 15, 37, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_TabUnfocusedActive, (32, 24, 54, 255))
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarBg, (10, 7, 18, 220))
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, self.palette["frame"])
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabHovered, self.palette["accent_soft"])
+                dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrabActive, self.palette["accent_red"])
+
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 16, 16)
+                dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 12, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 10, 8)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 0)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildRounding, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_GrabRounding, 8)
+                dpg.add_theme_style(dpg.mvStyleVar_GrabMinSize, 12)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize, 1)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
+                dpg.add_theme_style(dpg.mvStyleVar_TabRounding, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 1)
+        dpg.bind_theme(theme)
+
+        with dpg.theme() as stheme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_Separator, self.palette["red_sep"])
+        self.sep_theme = stheme
+
+        # Тема hover-попапа: глобальная тема делает WindowBg прозрачным
+        # (под ним градиент) - попапу нужен собственный непрозрачный фон.
+        with dpg.theme() as ptheme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, self.palette["panel"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, self.palette["separator"])
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBg, self.palette["panel"])
+                dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, self.palette["panel"])
+                dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 10, 10)
+                dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize, 1)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
+        self.popup_theme = ptheme
+
+    def lerp(self, a, b, t): return a + (b - a) * t
+
+    def is_dragging(self, _, data):
+        if dpg.is_mouse_button_down(0):
+            y = data[1]
+            if -2 <= y <= 19:
+                self.ui_dragging = True
+                if dpg.is_viewport_vsync_on(): dpg.set_viewport_vsync(False)
+        else:
+            self.ui_dragging = False
+            if not dpg.is_viewport_vsync_on(): dpg.set_viewport_vsync(True)
+
+    def drag_logic(self, _, data):
+        self.n += 1
+        if self.n % 30 != 0: return
+        self.n = 0
+        if self.ui_dragging:
+            pos = dpg.get_viewport_pos()
+            x = data[1]; y = data[2]
+            dpg.configure_viewport(self.viewport, x_pos=pos[0] + x, y_pos=pos[1] + y)
+
+    def add_event_handlers(self):
+        with dpg.handler_registry():
+            dpg.add_mouse_drag_handler(0, callback=self.drag_logic)
+            dpg.add_mouse_move_handler(callback=self.is_dragging)
+        dpg.set_viewport_always_top(True)
+
+    def run(self):
+        # Ручной цикл рендера: sync галочек, захват бинда, hover-попапы,
+        # рамки, список конфигов - каждый кадр в GUI-потоке.
+        dpg.show_viewport()
+        while dpg.is_dearpygui_running():
+            now = time.time()
+            if now - self._sync_last_ts >= self._sync_interval:
+                self._sync_last_ts = now
+                self._check_config_ts()
+                self._sync_external()
+            self._process_capture()
+            try:
+                self._update_hover_popup()
+            except Exception as e:
+                logutil.debug(f"[gui] hover popup error: {e}")
+            try:
+                self._update_frames()
+            except Exception as e:
+                logutil.debug(f"[gui] frames update error: {e}")
+            try:
+                active = self._active_tab_resolved()
+            except Exception:
+                active = None
+            if active == self._cfg_tab and self._cfg_tab is not None:
+                if self._force_cfg_refresh or (now - self._cfg_list_ts) >= 1.0:
+                    self._cfg_list_ts = now
+                    self._force_cfg_refresh = False
+                    try:
+                        self._refresh_cfg_list()
+                    except Exception as e:
+                        logutil.debug(f"[gui] cfg list refresh failed: {e}")
+            dpg.render_dearpygui_frame()
+        dpg.destroy_context()
+
+    def _sync_external(self):
+        """Подтягивает в галочки значения, изменённые вне GUI (общий движок
+        тогглов). Один снапшот .items() на тик вместо RPC на каждый тоггл."""
+        try:
+            snap = dict(self.config.items())
+        except Exception:
+            return
+        for key, _label in toggle_registry.TOGGLE_FEATURES:
+            tag = self._sync_tags.get(key)
+            if not tag:
+                continue
+            try:
+                want = bool(snap.get(key, False))
+                if bool(dpg.get_value(tag)) != want:
+                    dpg.set_value(tag, want)
+            except Exception:
+                pass
+
+    def _check_config_ts(self):
+        """Смена config_ts (профиль применён кнопкой или хоткеем) ->
+        полная перерисовка config-виджетов. Чтение flags - раз в
+        _sync_interval, не каждый кадр (Manager.dict = IPC)."""
+        if self.flags is None:
+            return
+        try:
+            ts = float(self.flags.get("config_ts", 0.0) or 0.0)
+        except Exception:
+            return
+        if ts != self._last_config_ts:
+            self._last_config_ts = ts
+            self._sync_all_widgets()
+            self._force_cfg_refresh = True
+
+    def _sync_all_widgets(self):
+        """Полная перезаливка значений из конфига во ВСЕ зарегистрированные
+        виджеты: галочки, слайдеры, комбо, пикеры цвета, лейблы хоткей-
+        кнопок. Вызывается при применении профиля (config_ts)."""
+        for item, reg in list(self._widget_reg.items()):
+            key, vtype, default, extra = reg
+            try:
+                val = self._config_get(key, default)
+                if vtype is bool:
+                    dpg.set_value(item, bool(val))
+                elif vtype is int:
+                    v = int(val)
+                    if extra:
+                        v = max(extra[0], min(extra[1], v))
+                    dpg.set_value(item, v)
+                elif vtype is float:
+                    v = float(val)
+                    if extra:
+                        v = max(extra[0], min(extra[1], v))
+                    dpg.set_value(item, v)
+                elif vtype == "combo":
+                    items = extra or []
+                    if val not in items:
+                        val = default
+                    dpg.set_value(item, val)
+                elif vtype == "color":
+                    hexv = val or default or "#FFFFFF"
+                    dpg.set_value(item, self.hex_to_rgb(hexv))
+            except Exception:
+                continue
+        # Пикеры элементов: значение + enabled по галочке "Свой цвет"
+        for pk, (cb_key, color_key, def_hex) in list(self._color_element_pickers.items()):
+            try:
+                hexv = self._config_get(color_key, def_hex) or def_hex
+                dpg.set_value(pk, self.hex_to_rgb(hexv))
+                dpg.configure_item(pk, enabled=bool(self._config_get(cb_key, False)))
+            except Exception:
+                continue
+        # Лейблы хоткей-кнопок (AimbotKey и т.п.)
+        for btn, key in list(self._hotkey_btns.items()):
+            try:
+                dpg.configure_item(btn, label=self._key_label(self._config_get(key, 0)))
+            except Exception:
+                continue
+        # Превью вкладки "Прицел" (если вкладка уже собрана)
+        self._redraw_crosshair_preview()
+
+    def _on_toggle_spectators(self, sender, value):
+        self._config_set("EnableShowSpectators", bool(value))
+
+    def _build_background(self):
+        """Градиент вьюпорта (фиолетовый верх -> чёрный низ) позади окна +
+        акцентная линия под титлбаром. viewport_drawlist(front=False):
+        без клиппинга, в layout окна не участвует."""
+        with dpg.viewport_drawlist(front=False) as dl:
+            self.bg_dl = dl
+            W, H = self.viewport_width, self.viewport_height
+            bands = 48
+            top = self.palette["bg_top"]
+            bot = self.palette["bg_bottom"]
+            band_h = H / float(bands)
+            for i in range(bands):
+                t = i / max(1, bands - 1)
+                r = int(round(self.lerp(top[0], bot[0], t)))
+                g = int(round(self.lerp(top[1], bot[1], t)))
+                b = int(round(self.lerp(top[2], bot[2], t)))
+                dpg.draw_rectangle(
+                    (0, i * band_h),
+                    (W, (i + 1) * band_h + 1),
+                    color=(0, 0, 0, 0),
+                    fill=(r, g, b, 255),
+                    thickness=0.0,
+                )
+            x0, x1, y = 16, W - 16, 27
+            lbands = 24
+            lc = self.palette["accent"][:3]
+            rc = self.palette["accent_red"][:3]
+            bw = (x1 - x0) / float(lbands)
+            for i in range(lbands):
+                t = i / max(1, lbands - 1)
+                r = int(round(self.lerp(lc[0], rc[0], t)))
+                g = int(round(self.lerp(lc[1], rc[1], t)))
+                b = int(round(self.lerp(lc[2], rc[2], t)))
+                dpg.draw_rectangle(
+                    (x0 + i * bw, y),
+                    (x0 + (i + 1) * bw + 1, y + 2),
+                    color=(0, 0, 0, 0),
+                    fill=(r, g, b, 255),
+                    thickness=0.0,
+                )
+
+    def _bind_tab(self, tab, label):
+        """Регистрирует вкладку: привязка рамок + карта для колбэка."""
+        self._cur_tab = tab
+        self._tab_tags.add(tab)
+        self._tab_by_label[label] = tab
+        if self._active_tab is None:
+            self._active_tab = tab
+
+    def _on_tab_change(self, sender, app_data, user_data):
+        # app_data в разных сборках DPG: тег вкладки или её label. Валидируем оба.
+        tab = app_data
+        if tab not in self._tab_tags:
+            tab = self._tab_by_label.get(str(tab), self._active_tab)
+        if tab != self._active_tab:
+            self._active_tab = tab
+            self._frame_sig = None  # принудительная перерисовка рамок
+
+    def _active_tab_resolved(self):
+        """Активная вкладка. Приоритет: прямой опрос значения таб-бара
+        (если сборка его отдаёт), затем колбэк. Оба валидируются по тегам."""
+        try:
+            v = dpg.get_value(self._tab_bar_id)
+            if v in self._tab_tags:
+                return v
+        except Exception:
+            pass
+        return self._active_tab
+
+    def _register_frame(self, item):
+        self._frame_items.append((item, self._cur_tab))
+
+    def _rect_sane(self, rect):
+        """Отсекает мусорную геометрию: вырожденную и за пределами вьюпорта."""
+        (x0, y0), (x1, y1) = rect
+        if (x1 - x0) < 4 or (y1 - y0) < 4:
+            return False
+        W, H = self.viewport_width, self.viewport_height
+        if x1 < -20 or y1 < -20 or x0 > W + 20 or y0 > H + 20:
+            return False
+        return True
+
+    def _item_rect(self, item):
+        """rect карточки (min, max). Два способа: item_state и pos+size."""
+        try:
+            st = dpg.get_item_state(item)
+            mn = st.get("rect_min")
+            mx = st.get("rect_max")
+            if mn and mx:
+                w = mx[0] - mn[0]
+                h = mx[1] - mn[1]
+                if w > 4 and h > 4:
+                    rect = (tuple(mn), tuple(mx))
+                    if self._rect_sane(rect):
+                        return rect
+        except Exception:
+            pass
+        try:
+            pos = dpg.get_item_pos(item)
+            size = dpg.get_item_rect_size(item)
+            if pos and size and size[0] > 4 and size[1] > 4:
+                rect = ((pos[0], pos[1]), (pos[0] + size[0], pos[1] + size[1]))
+                if self._rect_sane(rect):
+                    return rect
+        except Exception:
+            pass
+        return None
+
+    def _update_frames(self):
+        """Красные рамки карточек АКТИВНОЙ вкладки. frames_dl - фронт-слой.
+        Только активная вкладка, дедуп совпадающих rect, принудительная
+        перерисовка при смене вкладки."""
+        if self.frames_dl is None:
+            return
+        active = self._active_tab_resolved()
+        if active != self._active_tab:
+            self._active_tab = active
+            self._frame_sig = None
+        items = [it for (it, tab) in self._frame_items if tab == active]
+        sig = []
+        for it in items:
+            r = self._item_rect(it)
+            if r is not None and r not in sig:
+                sig.append(r)
+        if sig == self._frame_sig:
+            return
+        self._frame_sig = sig
+        try:
+            dpg.delete_item(self.frames_dl, children_only=True)
+        except Exception as e:
+            # Неудаённое удаление = накопление прямоугольников: пропуск цикла
+            logutil.debug(f"[gui] frames clear failed: {e}")
+            return
+        for (x0, y0), (x1, y1) in sig:
+            dpg.draw_rectangle(
+                (x0, y0), (x1, y1),
+                color=self.palette["red_border"],
+                thickness=1.0,
+                parent=self.frames_dl,
+            )
+
+    # ==================== Hover-попап тоггл-хоткеев ====================
+    # Наведение на галочку зарегистрированной функции -> маленькое окно
+    # справа от курсора: подпись функции, кнопка-бинд (пишет
+    # ToggleKey_<фича>), сброс. Позиция от координат мыши. Пока попап
+    # показан, focus_item держит его НАД root: клик по чекбоксу поднимает
+    # root в z-order, без фокуса попап уходил за текст.
+
+    def _build_hover_popup(self):
+        with dpg.window(
+            autosize=True,
+            no_move=True,
+            no_resize=True,
+            no_title_bar=True,
+            no_close=True,
+            no_collapse=True,
+            no_saved_settings=True,
+            show=False,
+        ) as popup:
+            self._hover_title = dpg.add_text("", color=self.palette["text_muted"])
+            dpg.add_spacer(height=2)
+            self._hover_bind_btn = dpg.add_button(
+                label=self._key_label(0),
+                width=190,
+                callback=self.keybind_use,
+            )
+            self._hover_reset_btn = dpg.add_button(
+                label="Сброс",
+                width=190,
+                callback=self._hover_reset,
+            )
+        try:
+            dpg.bind_item_theme(popup, self.popup_theme)
+        except Exception:
+            pass
+        self._hover_popup = popup
+
+    def _hover_reset(self, sender=None, app_data=None, user_data=None):
+        key = self._hover_current_key
+        if not key:
+            return
+        kname = toggle_registry.toggle_key_name(key)
+        self._config_set(kname, 0)
+        try:
+            dpg.configure_item(self._hover_bind_btn, label=self._key_label(0))
+        except Exception:
+            pass
+
+    def _update_hover_popup(self):
+        if self._hover_popup is None or not self._hover_rows:
+            return
+        now = time.time()
+        try:
+            mx, my = dpg.get_mouse_pos(local=False)
+        except Exception:
+            return
+
+        # Зажатая кнопка мыши: попап полностью замирает. Раньше фокус и
+        # позиция дёргались каждый кадр ПОСРЕДИ клика - DPG сбрасывал
+        # active-id чекбокса, и клик отменялся до отпускания кнопки.
+        try:
+            if dpg.is_mouse_button_down(0):
+                if self._hover_open_key is not None:
+                    self._hover_linger = now + 0.35
+                return
+        except Exception:
+            pass
+
+        hovered = None
+        for item, key, label in self._hover_rows:
+            try:
+                if dpg.get_item_state(item).get("hovered"):
+                    hovered = (item, key, label)
+                    break
+            except Exception:
+                continue
+
+        inside_popup = False
+        if self._hover_open_key is not None:
+            try:
+                if dpg.is_item_shown(self._hover_popup):
+                    w, h = dpg.get_item_rect_size(self._hover_popup)
+                    px, py = dpg.get_item_pos(self._hover_popup)
+                    inside_popup = (px <= mx < px + max(w, 10)) and (py <= my < py + max(h, 10))
+            except Exception:
+                pass
+
+        if hovered is not None:
+            _item, key, label = hovered
+            if key != self._hover_open_key:
+                self._hover_open_key = key
+                self._hover_current_key = key
+                kname = toggle_registry.toggle_key_name(key)
+                try:
+                    dpg.set_value(self._hover_title, label)
+                    dpg.configure_item(
+                        self._hover_bind_btn,
+                        user_data=kname,
+                        label=self._key_label(self._config_get(kname, 0)),
+                    )
+                except Exception:
+                    pass
+                # Открытие: позиция/показ/фокус - ОДИН раз на переходе,
+                # не каждый кадр. Каждый-кадровый focus_item убивал клики.
+                try:
+                    px = min(mx + 14, self.viewport_width - 226)
+                    py = max(4, min(my - 10, self.viewport_height - 132))
+                    dpg.set_item_pos(self._hover_popup, (px, py))
+                    dpg.configure_item(self._hover_popup, show=True)
+                    dpg.focus_item(self._hover_popup)
+                except Exception:
+                    pass
+            self._hover_linger = now + 0.35
+        elif inside_popup:
+            self._hover_linger = now + 0.35
+            # Если клик по галочке поднял root и попап ушёл под окно -
+            # возвращаем фокус, но только пока попап реально НЕ наведён.
+            # Когда курсор на нём и он сверху - фокус не трогаем, чтобы
+            # не убить клик по кнопке бинда.
+            try:
+                if not dpg.is_item_hovered(self._hover_popup):
+                    dpg.focus_item(self._hover_popup)
+            except Exception:
+                pass
+        elif now > self._hover_linger and self._hover_open_key is not None:
+            self._hover_open_key = None
+            self._hover_current_key = None
+            try:
+                dpg.configure_item(self._hover_popup, show=False)
+            except Exception:
+                pass
+
+    def build_ui(self):
+        self._build_background()
+        with dpg.viewport_drawlist(front=True) as fdl:
+            self.frames_dl = fdl
+
+        with dpg.window(
+            label="NERON_CAT - developed by Releotkamaza",
+            width=self.viewport_width,
+            height=self.viewport_height,
+            no_move=True,
+            no_resize=True,
+            no_close=True,
+            no_collapse=True,
+            tag=ROOT_TAG,
+        ) as root:
+            self.root_window = root
+
+            with dpg.tab_bar(callback=self._on_tab_change) as tbar:
+                self._tab_bar_id = tbar
+                self._build_tab_aimbot()
+                self._build_tab_visuals()
+                self._build_tab_triggerbot()
+                self._build_tab_recoil()
+                self._build_tab_crosshair()
+                self._build_tab_colors()
+                self._build_tab_bhop()
+                self._build_tab_misc()
+                self._build_tab_configs()
+
+        self._build_hover_popup()
+
+    def _tab_card(self, title, subtitle=None):
+        with dpg.child_window(
+            width=-1,
+            autosize_y=True,
+            no_scrollbar=True,
+            border=True
+        ) as container:
+            try:
+                dpg.bind_item_theme(container, self.sep_theme)
+            except Exception:
+                pass
+            self._register_frame(container)
+            header = dpg.add_group(parent=container)
+            dpg.add_text(title, color=self.palette["card_title"], parent=header)
+            if subtitle:
+                dpg.add_text(
+                    subtitle,
+                    color=self.palette["text_subtle"],
+                    parent=header
+                )
+            dpg.add_separator(parent=container)
+            dpg.add_spacer(height=10, parent=container)
+            content = dpg.add_group(parent=container)
+        return content
 
     def _build_tab_aimbot(self):
         with dpg.tab(label="Aimbot") as tab:
@@ -905,12 +1747,14 @@ class NERON_GUI:
                 s2 = self._config_slider_float("Размер Box", "ESP_BoxThicknessScale", 1.0, 0.6, 2.0, parent=right_col)
                 s3 = self._config_slider_float("Толщина HP Bar", "ESP_HealthBarThicknessScale", 1.0, 0.6, 1.6, parent=right_col)
                 s4 = self._config_slider_float("Толщина трейсеров", "ESP_TracerThickness", 1.5, 0.5, 4.0, parent=right_col, format="%.1f")
+                s5 = self._config_slider_int("Экстраполяция ESP (мс)", "ESP_ExtrapolateMs", 0, 0, 200, parent=right_col)
 
                 try:
                     dpg.configure_item(s1, width=int(self.control_width*1.4))
                     dpg.configure_item(s2, width=int(self.control_width*1.4))
                     dpg.configure_item(s3, width=int(self.control_width*1.4))
                     dpg.configure_item(s4, width=int(self.control_width*1.4))
+                    dpg.configure_item(s5, width=int(self.control_width*1.4))
                 except Exception:
                     pass
 
@@ -933,6 +1777,235 @@ class NERON_GUI:
             card = self._tab_card("Контроль отдачи", "Контроль отдачи оружия.")
             self._config_checkbox("Включение контроля отдачи", "EnableRecoilControl", parent=card)
             self._config_slider_float("Плавность контроля отдачи", "RecoilControlSmoothing", 1.5, 1.0, 3.0, parent=card, format="%.2f")
+
+    # ==================== Вкладка "Прицел" ====================
+    # Кастомный прицел (features/customcrosshair.py) + перенос точки
+    # ноускопа из "Прочее". Колбек _xc_change: запись конфига + живое
+    # превью. Регистрации в _widget_reg совместимы с _sync_all_widgets
+    # (bool/int/float/"color"/"combo"), профили подхватывают значения.
+
+    def _xc_change(self, sender, app_data, user_data):
+        key, vtype = user_data
+        try:
+            if vtype is bool:
+                self._config_set(key, bool(app_data))
+            elif vtype is int:
+                self._config_set(key, int(app_data))
+            elif vtype is float:
+                self._config_set(key, float(app_data))
+            elif vtype == "color":
+                hexv = self._color_value_to_hex(app_data)
+                if hexv:
+                    self._config_set(key, hexv)
+            else:
+                self._config_set(key, app_data)
+        except Exception as e:
+            logutil.debug(f"[gui] xc change failed for {key}: {e}")
+        self._redraw_crosshair_preview()
+
+    def _preview_blend(self, hexstr, op01):
+        """Альфа-имитация на белой подложке превью: c*op + 255*(1-op)."""
+        r, g, b = self.hex_to_rgb(hexstr)
+        return (int(round(r * op01 + 255 * (1.0 - op01))),
+                int(round(g * op01 + 255 * (1.0 - op01))),
+                int(round(b * op01 + 255 * (1.0 - op01))),
+                255)
+
+    def _redraw_crosshair_preview(self):
+        """Перерисовка превью прицела и точки. Один bulk-снапшот конфига
+        на вызов (IPC-канон). Нет drawlist'ов (вкладка не собрана) - выход."""
+        if self._xc_preview_dl is None or self._dot_preview_dl is None:
+            return
+        try:
+            snap = dict(self.config.items())
+        except Exception:
+            snap = {}
+        # --- прицел ---
+        try:
+            W, H = self._xc_preview_size
+            cx, cy = W // 2, H // 2
+            dpg.delete_item(self._xc_preview_dl, children_only=True)
+            dpg.draw_rectangle((0, 0), (W, H), color=(190, 190, 190, 255),
+                               fill=(255, 255, 255, 255), parent=self._xc_preview_dl)
+            th = max(1.0, min(10.0, float(snap.get("Crosshair_Thickness", 2.0) or 2.0)))
+            ln = max(1.0, min(30.0, float(snap.get("Crosshair_Length", 8.0) or 8.0)))
+            gap = max(0.0, min(20.0, float(snap.get("Crosshair_Gap", 4.0) or 4.0)))
+            op = max(10, min(100, int(snap.get("Crosshair_Opacity", 100) or 100))) / 100.0
+            hexc = snap.get("Crosshair_color", "#00FF00") or "#00FF00"
+            outline = bool(snap.get("Crosshair_Outline", True))
+            tshape = str(snap.get("Crosshair_Style", "Обычный") or "Обычный") == "T-образный"
+            col = self._preview_blend(hexc, op)
+            out_col = self._preview_blend("#000000", min(1.0, op + 0.25))
+            half = th / 2.0
+            segs = [
+                (cx - gap - ln, cy - half, ln, th),
+                (cx + gap,      cy - half, ln, th),
+                (cx - half,     cy + gap,  th, ln),
+            ]
+            if not tshape:
+                segs.append((cx - half, cy - gap - ln, th, ln))
+            if outline:
+                for (x, y, w, h) in segs:
+                    dpg.draw_rectangle((x - 1, y - 1), (x + w + 1, y + h + 1),
+                                       color=out_col, fill=out_col, parent=self._xc_preview_dl)
+            for (x, y, w, h) in segs:
+                dpg.draw_rectangle((x, y), (x + w, y + h),
+                                   color=col, fill=col, parent=self._xc_preview_dl)
+        except Exception as e:
+            logutil.debug(f"[gui] xc preview: {e}")
+        # --- точка ноускопа ---
+        try:
+            W, H = self._dot_preview_size
+            cx, cy = W // 2, H // 2
+            dpg.delete_item(self._dot_preview_dl, children_only=True)
+            dpg.draw_rectangle((0, 0), (W, H), color=(190, 190, 190, 255),
+                               fill=(255, 255, 255, 255), parent=self._dot_preview_dl)
+            radius = max(1.0, min(12.0, float(snap.get("NoScopeDot_radius", 5.0) or 5.0)))
+            op = max(10, min(100, int(snap.get("NoScopeDot_opacity", 80) or 80))) / 100.0
+            hexc = snap.get("NoScopeDot_color", "#FFFFFF") or "#FFFFFF"
+            col = self._preview_blend(hexc, op)
+            dpg.draw_circle((cx, cy), max(1, int(round(radius))),
+                            color=col, fill=col, parent=self._dot_preview_dl)
+        except Exception as e:
+            logutil.debug(f"[gui] dot preview: {e}")
+
+    def _build_tab_crosshair(self):
+        with dpg.tab(label="Прицел") as tab:
+            self._bind_tab(tab, "Прицел")
+            card = self._tab_card("Кастомный прицел", "Свой прицел поверх стандартного.")
+            sw = int(self.viewport_width * 0.7)   # слайдеры почти во всю ширину
+
+            # --- Мастер + режим свапа с точкой ноускопа ---
+            cb = dpg.add_checkbox(
+                label="Включение прицела",
+                default_value=bool(self._config_get("EnableCustomCrosshair", False)),
+                callback=self._xc_change,
+                user_data=("EnableCustomCrosshair", bool),
+                parent=card)
+            self._widget_reg[cb] = ("EnableCustomCrosshair", bool, False, None)
+            dpg.add_checkbox(
+                label="Отдельный прицел для ноускопов (AWP/SSG/SCAR-20/G3SG1)",
+                default_value=bool(self._config_get("EnableNoScopeDotSeparate", False)),
+                callback=self._xc_change,
+                user_data=("EnableNoScopeDotSeparate", bool),
+                parent=card)
+
+            dpg.add_spacer(height=6, parent=card)
+            dpg.add_separator(parent=card)
+            dpg.add_spacer(height=6, parent=card)
+
+            # --- Точка ноускопа (перенос из "Прочее", ключи прежние) ---
+            dpg.add_text("Точка ноускопа", color=self.palette["text_muted"], parent=card)
+            cb_dot = dpg.add_checkbox(
+                label="Точка при ноускопе (AWP/SSG/SCAR-20/G3SG1)",
+                default_value=bool(self._config_get("EnableNoScopeDot", False)),
+                callback=self._xc_change,
+                user_data=("EnableNoScopeDot", bool),
+                parent=card)
+            # Тоггл-фича из реестра: hover-бинд + sync с движком хоткеев
+            # (переносится вместе с галочкой из "Прочее").
+            if "EnableNoScopeDot" in self._toggle_labels:
+                self._hover_rows.append((cb_dot, "EnableNoScopeDot", self._toggle_labels["EnableNoScopeDot"]))
+                self._sync_tags["EnableNoScopeDot"] = cb_dot
+            self._widget_reg[cb_dot] = ("EnableNoScopeDot", bool, False, None)
+            s_dr = dpg.add_slider_float(
+                label="Радиус точки (px)",
+                default_value=float(self._config_get("NoScopeDot_radius", 5.0)),
+                min_value=1.0, max_value=12.0, format="%.1f",
+                callback=self._xc_change,
+                user_data=("NoScopeDot_radius", float),
+                parent=card)
+            s_do = dpg.add_slider_int(
+                label="Непрозрачность точки (%)",
+                default_value=int(self._config_get("NoScopeDot_opacity", 80)),
+                min_value=10, max_value=100, format="%d%%",
+                callback=self._xc_change,
+                user_data=("NoScopeDot_opacity", int),
+                parent=card)
+            self._widget_reg[s_dr] = ("NoScopeDot_radius", float, 5.0, (1.0, 12.0))
+            self._widget_reg[s_do] = ("NoScopeDot_opacity", int, 80, (10, 100))
+
+            dpg.add_spacer(height=6, parent=card)
+            dpg.add_separator(parent=card)
+            dpg.add_spacer(height=6, parent=card)
+
+            # --- Форма и цвет ---
+            dpg.add_text("Форма и цвет", color=self.palette["text_muted"], parent=card)
+            cur_style = self._config_get("Crosshair_Style", "Обычный")
+            if cur_style not in ("Обычный", "T-образный"):
+                cur_style = "Обычный"
+            cmb = dpg.add_combo(
+                label="Тип прицела",
+                items=["Обычный", "T-образный"],
+                default_value=cur_style,
+                callback=self._xc_change,
+                user_data=("Crosshair_Style", "combo"),
+                parent=card)
+            self._widget_reg[cmb] = ("Crosshair_Style", "combo", "Обычный", ["Обычный", "T-образный"])
+
+            hexc = self._config_get("Crosshair_color", "#00FF00") or "#00FF00"
+            pk = dpg.add_color_picker(
+                label="Цвет прицела",
+                default_value=self.hex_to_rgb(hexc),
+                no_alpha=True, no_inputs=True, no_side_preview=True, no_small_preview=True,
+                width=90, height=90,
+                callback=self._xc_change,
+                user_data=("Crosshair_color", "color"),
+                parent=card)
+            self._widget_reg[pk] = ("Crosshair_color", "color", "#00FF00", None)
+
+            s_op = dpg.add_slider_int(
+                label="Непрозрачность (%)",
+                default_value=int(self._config_get("Crosshair_Opacity", 100)),
+                min_value=10, max_value=100, format="%d%%",
+                callback=self._xc_change,
+                user_data=("Crosshair_Opacity", int),
+                parent=card)
+            s_th = dpg.add_slider_float(
+                label="Толщина (px)",
+                default_value=float(self._config_get("Crosshair_Thickness", 2.0)),
+                min_value=1.0, max_value=10.0, format="%.1f",
+                callback=self._xc_change,
+                user_data=("Crosshair_Thickness", float),
+                parent=card)
+            s_ln = dpg.add_slider_float(
+                label="Длина (px)",
+                default_value=float(self._config_get("Crosshair_Length", 8.0)),
+                min_value=1.0, max_value=30.0, format="%.1f",
+                callback=self._xc_change,
+                user_data=("Crosshair_Length", float),
+                parent=card)
+            s_gp = dpg.add_slider_float(
+                label="Зазор (px)",
+                default_value=float(self._config_get("Crosshair_Gap", 4.0)),
+                min_value=0.0, max_value=20.0, format="%.1f",
+                callback=self._xc_change,
+                user_data=("Crosshair_Gap", float),
+                parent=card)
+            dpg.add_checkbox(
+                label="Обводка",
+                default_value=bool(self._config_get("Crosshair_Outline", True)),
+                callback=self._xc_change,
+                user_data=("Crosshair_Outline", bool),
+                parent=card)
+            for s in (s_op, s_th, s_ln, s_gp, s_dr, s_do):
+                try:
+                    dpg.configure_item(s, width=sw)
+                except Exception:
+                    pass
+
+            dpg.add_spacer(height=6, parent=card)
+            dpg.add_separator(parent=card)
+            dpg.add_spacer(height=6, parent=card)
+
+            # --- Предпросмотр: прицел + точка, белая подложка ---
+            dpg.add_text("Предпросмотр", color=self.palette["text_muted"], parent=card)
+            with dpg.group(horizontal=True, horizontal_spacing=14, parent=card):
+                self._xc_preview_size = (300, 130)
+                self._dot_preview_size = (150, 130)
+                self._xc_preview_dl = dpg.add_drawlist(width=300, height=130)
+                self._dot_preview_dl = dpg.add_drawlist(width=150, height=130)
+            self._redraw_crosshair_preview()
 
     def _build_tab_colors(self):
         with dpg.tab(label="Цвета") as tab:
@@ -1175,9 +2248,8 @@ class NERON_GUI:
             self._bind_tab(tab, "Прочее")
             card = self._tab_card("Прочее", "Прочие различные настройки.")
             self._config_checkbox("Убрать чёрный скоуп (AWP/SSG/SCAR-20/G3SG1)", "EnableNoScopeOverlay", parent=card)
-            self._config_checkbox("Точка при ноускопе (AWP/SSG/SCAR-20/G3SG1)", "EnableNoScopeDot", parent=card)
-            self._config_slider_float("Радиус точки (px)", "NoScopeDot_radius", 5.0, 1.0, 12.0, parent=card, format="%.1f")
-            self._config_slider_int("Непрозрачность точки (%)", "NoScopeDot_opacity", 80, 10, 100, parent=card)
+            # Точка ноускопа (галочка + радиус + непрозрачность) переехала
+            # во вкладку "Прицел" (v6.3), ключи прежние.
             self._config_checkbox("Включение таймера бомбы", "EnableESPBombTimer", parent=card)
             self._config_checkbox("Включение Антифлеша", "EnableAntiFlashbang", parent=card)
             self._config_checkbox("Удаление смоков", "EnableNoSmoke", parent=card)

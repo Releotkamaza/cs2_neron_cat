@@ -30,6 +30,7 @@ class Offset:
     m_lifeState: int
     m_iTeamNum: int
     m_vOldOrigin: int
+    m_vecAbsOrigin: int
     m_pGameSceneNode: int
     m_modelState: int
     m_nodeToWorld: int
@@ -145,6 +146,24 @@ class Client:
             )
 
 
+def _safe_offset(oc: Client, key: str) -> int:
+    """Возвращает оффсет или 0, если ключа нет в дампе.
+    Нужно для полей, которые могут отсутствовать в актуальных оффсетах,
+    но код их ожидает (например, dwSensitivity)."""
+    try:
+        return oc.offset(key)
+    except OffsetError:
+        return 0
+
+
+def _safe_schema(oc: Client, class_name: str, field: str) -> int:
+    """Оффсет поля схемы или 0, если класса/поля нет в дампе."""
+    try:
+        return oc.get(class_name, field)
+    except OffsetError:
+        return 0
+
+
 def get_offsets() -> Offset:
     oc = Client(prefer_local=True)
     return Offset(
@@ -154,8 +173,8 @@ def get_offsets() -> Offset:
         dwLocalPlayerController=oc.offset("dwLocalPlayerController"),
         dwViewAngles=oc.offset("dwViewAngles"),
         dwGameRules=oc.offset("dwGameRules"),
-        dwSensitivity_sensitivity=oc.offset("dwSensitivity_sensitivity"),
-        dwSensitivity=oc.offset("dwSensitivity"),
+        dwSensitivity_sensitivity=_safe_offset(oc, "dwSensitivity_sensitivity"),
+        dwSensitivity=_safe_offset(oc, "dwSensitivity"),
         ButtonJump=oc.button("jump"),
         ButtonLeft=oc.button("left"),
         ButtonRight=oc.button("right"),
@@ -166,6 +185,7 @@ def get_offsets() -> Offset:
         m_lifeState=oc.get("C_BaseEntity", "m_lifeState"),
         m_iTeamNum=oc.get("C_BaseEntity", "m_iTeamNum"),
         m_vOldOrigin=oc.get("C_BasePlayerPawn", "m_vOldOrigin"),
+        m_vecAbsOrigin=_safe_schema(oc, "CGameSceneNode", "m_vecAbsOrigin"),
         m_pGameSceneNode=oc.get("C_BaseEntity", "m_pGameSceneNode"),
         m_modelState=oc.get("CSkeletonInstance", "m_modelState"),
         m_nodeToWorld=oc.get("CGameSceneNode", "m_nodeToWorld"),

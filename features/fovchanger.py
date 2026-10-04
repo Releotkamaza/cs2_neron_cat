@@ -1,4 +1,3 @@
-# markers: START features/fovchanger.py v10
 from functions import memfuncs
 from functions import logutil
 from features import noscopedot
@@ -38,10 +37,20 @@ ZOOM_PRESS_GRACE = 0.35
 # Сколько времени считаем, что FOV всё ещё уходит в зум
 ZOOM_IN_BRIDGE = 0.12
 
-# Сколько ждать перед принудительным выходом из "залипшего" скоупа
-ZOOM_LOST_TIMEOUT = 0.80
+# Сколько ждать перед первым (мягким) вмешательством в "залипший" скуп.
+# v11.1: 0.8 -> 1.5. Мягкий unstick пишет только m_iDesiredFOV и не
+# выбивает in_scope - окно нужно, чтобы штатная интерполяция выхода
+# сама доехала до 90 (раньше жёсткий форс m_iFOV резал анимацию -
+# "фов передёргивается" после выстрела).
+ZOOM_LOST_TIMEOUT = 1.5
+
+# Последний рубеж: если FOV так и не тронулся, спустя этот срок -
+# хард-форс m_iFOV и выход из состояния скоупа (старое поведение).
+ZOOM_LOST_HARD_AFTER = 5.0
 
 FOV_RATE_EPS = 0.001
+
+# Логирование fovchanger отключено в релизной версии
 
 # ==================== Структурные константы entity-листа ====================
 # Единая конвенция проекта - та же, что в шапке features/noscopedot.py.
@@ -268,36 +277,30 @@ def FovChangerThreadFunction(Options, Offsets):
     weapon_cache = {"handle": -1, "entity": 0}
 
     def _entity_from_handle(proc, client_base, handle):
+        """Энтить оружия по handle. Тот же бакетный канон, что в
+        _sniper_in_hands/spectator (ENT_STRIDE=112). Раньше здесь был
+        мёртвый формат (0x1FFF / 0x78) - мусорный указатель превращался
+        в "легальный" zoom_level=0 и разблокировал unstick-ветку, которая
+        ложно сбрасывала зум с FOV. Валидность адреса обязательна."""
         try:
             handle = int(handle)
             if handle == 0:
                 return 0
 
-            index = handle & 0x1FFF
+            index = handle & HANDLE_SER_MASK
             if index == 0:
                 return 0
-
             entity_list = memfuncs.ProcMemHandler.ReadPointer(proc, client_base + o_entity_list)
             if not entity_list:
                 return 0
 
             list_entry = memfuncs.ProcMemHandler.ReadPointer(
-                proc,
-                entity_list + 0x10 + 8 * ((index >> 9) & 0x1FF)
-            )
+                proc, entity_list + ENT_BUCKET_STEP * (index >> 9) + ENT_IDENTITY)
             if not list_entry:
                 return 0
 
             entity = memfuncs.ProcMemHandler.ReadPointer(
-                proc,
-                list_entry + 0x78 * (index & 0x1FF)
-            )
-            # Валидность обязательна (канон spectator/nosmoke). Резолв здесь
-            # известен как мёртвый (0x1FFF/0x78 - долг): без проверки мусорный
-            # указатель доходил до ReadInt(zl), а с memfuncs v2.1 (сбой -> 0)
-            # мусор превращался в "легальный" zoom_level=0 и разблокировал
-            # unstick-ветку, которая спала весь рантайм. Гейт возвращает
-            # пути историческое поведение: мусор -> 0 -> zoom_level = -1.
+                proc, list_entry + ENT_STRIDE * (index & HANDLE_IDX_MASK))
             entity = int(entity or 0) & MASK64
             if USER_LOW <= entity <= USER_HIGH:
                 return entity
@@ -574,6 +577,7 @@ def FovChangerThreadFunction(Options, Offsets):
                     # нетронутым, крест в core.py по той же схеме не рисуется.
                     scope_is_sniper = _sniper_in_hands(process, client, local_pawn)
                     _set_noscope_active(False)
+                    pass # trace disabled
             else:
                 if (not raw_signal) and (now - last_scope_signal_time >= SCOPE_STATE_DEBOUNCE):
                     in_scope = False
@@ -582,23 +586,14 @@ def FovChangerThreadFunction(Options, Offsets):
                     zoom_lost_since = 0.0
                     scope_is_sniper = False
                     _set_noscope_active(False)
+                    pass # trace disabled
 
             if in_scope and actual_zoom:
                 locked_scope_fov = current_fov
 
             # Отладка по желанию: включи "FovDebug": True
             if bool(opts_cache.get("FovDebug", False)) and now >= next_debug_log:
-                try:
-                    logutil.debug(
-                        f"[fovchanger] raw={raw_scoped} actual={actual_zoom} allowed={raw_scope_allowed} "
-                        f"btn={zoom_button_down} press={recent_zoom_press} zin={recent_zooming_in} "
-                        f"signal={raw_signal} fov={current_fov} rate={fov_rate:.4f} zoom={zoom_level} "
-                        f"in_scope={in_scope} removed={noscope_removed} locked={locked_scope_fov} "
-                        f"sniper={scope_is_sniper} "
-                        f"since_scope={(now - last_scope_signal_time):.3f}"
-                    )
-                except Exception:
-                    pass
+                pass # debug disabled
                 next_debug_log = now + 1.0
 
             if in_scope:
@@ -626,9 +621,19 @@ def FovChangerThreadFunction(Options, Offsets):
                             _write_bool(process, local_pawn + o_old_scoped, False)
 
                         # Игра пытается вытащить FOV из зума, а оружие всё ещё
-                        # реально в zoom - удерживаем зум-FOV.
-                        if zoom_level > 0 and locked_scope_fov > 0 and current_fov > SCOPE_FOV_MAX:
+                        # реально в zoom - удерживаем зум-FOV. v11.2: только
+                        # пока игрок держит кнопку zoom. После выстрела при
+                        # отпущенной ПКМ m_zoomLevel может ещё какое-то время
+                        # оставаться 1, и старый protect жёстко сбрасывал FOV
+                        # обратно в 40 на полпути к 90 - "фов передёргивается".
+                        if (
+                            zoom_level > 0
+                            and locked_scope_fov > 0
+                            and current_fov > SCOPE_FOV_MAX
+                            and zoom_button_down
+                        ):
                             protect_fov = locked_scope_fov
+                            pass # trace disabled
                             try:
                                 memfuncs.ProcMemHandler.WriteInt(process, camera_services + o_fov, protect_fov)
                                 if o_fov_start:
@@ -638,20 +643,42 @@ def FovChangerThreadFunction(Options, Offsets):
                             except Exception:
                                 pass
 
-                        # Безопасный unstick: форсим выход только если
-                        # - оружие уже точно не в zoom
-                        # - флага скоупа нет
-                        # - FOV остался низким
-                        # - и при этом FOV не двигается
+                        # Мягкий unstick (v11.1): условие залипа - оружие уже
+                        # точно не в zoom, флага скоупа нет, FOV низкий и не
+                        # двигается. Раньше здесь был жёсткий форс m_iFOV +
+                        # снос in_scope - теперь это "передёргивание" FOV при
+                        # выходе из прицеливания / отдаче после выстрела.
+                        # Ступень 1 (мягкая): только m_iDesiredFOV - игре
+                        # задаём цель, сама интерполяция не режется, состояние
+                        # скоупа не трогаем (живой зум с транзиентным
+                        # zoom_level==0 на кадре отдачи не сбивается).
+                        # Ступень 2 (хард): FOV реально залип надолго -
+                        # тогда хард-форс и выход из скоупа.
+                        # v11.3: НЕ вмешиваемся в живой зум. living_zoom:
+                        # кнопка зажата, недавнее нажатие, недавний вход
+                        # (fov_rate<0) или недавний реальный зум. Отдача и
+                        # перезарядка зума после выстрела могут транзиентно
+                        # давать zoom_level==0 при живом зуме - без этого
+                        # гейта мягкая ступень (desired=90) дралась бы с
+                        # protect за FOV: "фов передёргивается".
+                        living_zoom = (
+                            zoom_button_down
+                            or recent_zoom_press
+                            or recent_zooming_in
+                            or recent_actual_zoom
+                        )
                         if (
                             zoom_level == 0
                             and not raw_scoped
                             and current_fov < SCOPE_FOV_MAX
                             and abs(fov_rate) <= FOV_RATE_EPS
+                            and not living_zoom
                         ):
                             if zoom_lost_since == 0.0:
                                 zoom_lost_since = now
-                            elif now - zoom_lost_since > ZOOM_LOST_TIMEOUT:
+                                pass # trace disabled
+                            elif now - zoom_lost_since >= ZOOM_LOST_HARD_AFTER:
+                                pass # trace disabled
                                 in_scope = False
                                 noscope_removed = False
                                 scope_is_sniper = False
@@ -659,7 +686,8 @@ def FovChangerThreadFunction(Options, Offsets):
                                 last_scope_signal_time = now
                                 zoom_lost_since = 0.0
 
-                                # Принудительно вытаскиваем FOV из застрявшего зума
+                                # Последний рубеж: принудительно вытаскиваем
+                                # FOV из по-настоящему застрявшего зума
                                 try:
                                     if local_controller and o_desired_fov:
                                         memfuncs.ProcMemHandler.WriteInt(process, local_controller + o_desired_fov, desired_fov)
@@ -676,6 +704,18 @@ def FovChangerThreadFunction(Options, Offsets):
 
                                 time.sleep(0.001)
                                 continue
+                            elif now - zoom_lost_since > ZOOM_LOST_TIMEOUT:
+                                # Мягкое подталкивание: только желаемая цель
+                                # интерполяции, текущий m_iFOV и состояние
+                                # скоупа не трогаем. Перезапускаем таймер,
+                                # чтобы не спамить каждый цикл.
+                                pass # trace disabled
+                                zoom_lost_since = now
+                                try:
+                                    if local_controller and o_desired_fov:
+                                        memfuncs.ProcMemHandler.WriteInt(process, local_controller + o_desired_fov, desired_fov)
+                                except Exception:
+                                    pass
                         else:
                             zoom_lost_since = 0.0
                 else:
@@ -746,4 +786,3 @@ def FovChangerThreadFunction(Options, Offsets):
             logutil.debug(f"[fovchanger] loop exception: {exc}")
             connector.invalidate()
             time.sleep(0.01)
-# markers: END features/fovchanger.py v10

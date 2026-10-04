@@ -71,6 +71,10 @@ CHEAT_SETTINGS = {
     "HPBar_color": "#FF6A5A",
     # Толщина трейсеров (слайдер в "Визуал и толщина")
     "ESP_TracerThickness": 1.5,
+    # Компенсация отставания ESP вперёд по скорости (мс; слайдер там же).
+    # Аимка (пинг ~0): ~50 достаточно. Отстаёт бокс в матче - поднять до
+    # 100-150; "перелетает" впереди модели - снизить до 0-30.
+    "ESP_ExtrapolateMs": 0,
 
     "FOV_color": "#FFFFFF",            # GUI-ONLY: пикер в "Цветах", рендерер не читает
 
@@ -78,8 +82,19 @@ CHEAT_SETTINGS = {
     # читает features/noscopedot.py.
     "EnableNoScopeDot": False,
     "NoScopeDot_color": "#FFFFFF",
-    "NoScopeDot_radius": 5.0,          # радиус в px (1-12), слайдер в "Прочее"
-    "NoScopeDot_opacity": 80,          # непрозрачность в % (10-100), слайдер в "Прочее"
+    "NoScopeDot_radius": 5.0,          # радиус в px (1-12), слайдер во вкладке "Прицел"
+    "NoScopeDot_opacity": 80,          # непрозрачность в % (10-100), слайдер во вкладке "Прицел"
+
+    # Кастомный прицел (features/customcrosshair.py, вкладка "Прицел")
+    "EnableCustomCrosshair": False,
+    "EnableNoScopeDotSeparate": False,  # точка для снайперок, кастомный - для остального
+    "Crosshair_Style": "Обычный",       # "Обычный" | "T-образный"
+    "Crosshair_color": "#00FF00",
+    "Crosshair_Opacity": 100,           # % (10-100)
+    "Crosshair_Thickness": 2.0,         # px (1-10)
+    "Crosshair_Length": 8.0,            # px (1-30)
+    "Crosshair_Gap": 4.0,               # px (0-20)
+    "Crosshair_Outline": True,
 
     "EnableBhop": False,
     "EnableBhopAutoStrafe": False,

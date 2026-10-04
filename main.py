@@ -230,6 +230,12 @@ if __name__ == "__main__":
         target_fps = 240
     esp.pme.set_fps(target_fps)
 
+    # vsync оверлея: FLAG_VSYNC_HINT=0x40 (raylib -> glfwSwapInterval(1)).
+    # set_window_flag - ТОГГЛ, поэтому вызов ровно один раз при старте.
+    # Синхронизация с развёрткой убирает блоки end_drawing (9-65 мс: DWM
+    # под нагрузкой игры в borderless), выравнивая кадр до ~1/refresh.
+    esp.pme.set_window_flag(0x40)
+
     # FOV changer
     FOV_proc = multiprocessing.Process(target=fovchanger.FovChangerThreadFunction, args=(SharedOptions, SharedOffsets,))
     FOV_proc.daemon = True
@@ -326,7 +332,7 @@ if __name__ == "__main__":
             continue
 
         if not overlay_logged_once:
-            logutil.debug("[main] overlay loop entered; Spec List will be drawn from features/esp/core.py.")
+            logutil.debug("[main] overlay loop entered; Spec List will be drawn from features/esp/static.py.")
             logutil.debug("[main] rendering Spec List on the game frame (inside ESP begin/end drawing)")
             overlay_logged_once = True
 

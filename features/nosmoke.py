@@ -223,6 +223,20 @@ def get_class_name(h, entity_ptr, name_off):
     return read_cstr_utf8(h, name_ptr, 48)
 
 
+def _confirm_smoke(hproc, entlist_ptr, i, entity, name_off):
+    """Повторная перепроверка энтити ПЕРЕД записью: тот же слот вернул ТОТ ЖЕ
+    указатель и класс всё ещё smokegrenade_projectile. Аналог _pawn_alive из
+    antiflash: между чтением entity и записью объект может освободиться
+    (деспавн смока, загрузка/выход матча), запись тогда уходит в
+    переиспользованную/полупостроенную память и может ронять игру."""
+    try:
+        if ent_by_index(hproc, entlist_ptr, i) != entity:
+            return False
+        return get_class_name(hproc, entity, name_off) == SMOKE_CLASS_NAME
+    except Exception:
+        return False
+
+
 def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
     off = Offsets.offset
@@ -278,12 +292,16 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
                 if get_class_name(hproc, entity, name_off) != SMOKE_CLASS_NAME:
                     continue
 
-                # Подавление смока - всегда и для всех
+                # Подавление смока - всегда и для всех. Запись только после
+                # повторной перепроверки: в момент массового деспавна (загрузка/
+                # выход матча) слот entity-листа может отдать освобождённую или
+                # переиспользованную энтити - запись в неё роняет игру.
                 if did_off and not rd_bool(hproc, entity + did_off):
-                    try:
-                        memfuncs.ProcMemHandler.WriteBool(hproc, entity + did_off, True)
-                    except Exception:
-                        pass
+                    if _confirm_smoke(hproc, entlist_ptr, i, entity, name_off):
+                        try:
+                            memfuncs.ProcMemHandler.WriteBool(hproc, entity + did_off, True)
+                        except Exception:
+                            pass
 
                 # Центр для маркера
                 if not pos_off:

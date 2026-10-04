@@ -1,4 +1,3 @@
-# markers: START features/triggerbot.py v2
 import gc
 import json
 import math
@@ -622,4 +621,3 @@ def TriggerbotThreadFunction(Options, Offsets):
                 last_exception_time = now
                 connector.invalidate()
             time.sleep(0.05)
-# markers: END features/triggerbot.py v2

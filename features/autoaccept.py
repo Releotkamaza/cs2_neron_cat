@@ -1,4 +1,3 @@
-# markers: START functions/autoaccept.py v2.4
 import time
 import json
 import os
@@ -591,4 +590,3 @@ def AutoAcceptThreadFunction(Options, Offsets):
         except Exception as e:
             _dbg(f"исключение: {e!r}")
             time.sleep(0.5)
-# markers: END functions/autoaccept.py v2.4
