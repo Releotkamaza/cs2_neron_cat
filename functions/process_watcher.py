@@ -1,9 +1,20 @@
+import ctypes
 import threading
 import time
 from typing import Dict, Iterable, Optional
 import pymem
 from pymem.process import module_from_name
 from functions import logutil
+
+# GetExitCodeProcess: код STILL_ACTIVE у живого процесса, иначе он завершился.
+_STILL_ACTIVE = 259
+_k32 = ctypes.windll.kernel32
+_k32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+_k32.GetExitCodeProcess.restype = ctypes.c_int
+
+# Как часто проверять живость процесса (в секундах). Проверка - один сисколл,
+# но в циклах на 1000 Гц её нельзя делать каждую итерацию.
+_ALIVE_CHECK_INTERVAL = 0.5
 
 
 class ProcessConnector:
@@ -19,6 +30,29 @@ class ProcessConnector:
         self._proc: Optional[pymem.Pymem] = None
         self._module_cache: Dict[str, int] = {}
         self._module_whitelist = {m.lower() for m in modules} if modules else set()
+        self._alive_ts = 0.0
+
+    @staticmethod
+    def _proc_alive(proc: pymem.Pymem) -> bool:
+        """Живой ли ещё процесс у этого хэндла.
+
+        pymem держит хэндл до close() и НЕ проверяет смерть процесса: чтение
+        атрибута process_handle никогда не падает. Без этой проверки после
+        закрытия/перезапуска CS2 чит остаётся со СТАРЫМ хэндлом и СТАРЫМ
+        кэшем баз модуля - фичи молча перестают работать (ESP/glow/nosmoke/
+        fovchanger), а записи уходят в мёртвый хэндл. Fail-open: если саму
+        проверку сделать не удалось, считаем процесс живым (поведение не хуже
+        прежнего и никаких ложных переподключений)."""
+        try:
+            handle = proc.process_handle
+            if not handle:
+                return False
+            code = ctypes.c_ulong(0)
+            if not _k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return True
+            return int(code.value) == _STILL_ACTIVE
+        except Exception:
+            return True
 
     def _wait_for_process(self) -> pymem.Pymem:
         while True:
@@ -44,17 +78,24 @@ class ProcessConnector:
             time.sleep(self.poll_interval)
 
     def ensure_process(self) -> pymem.Pymem:
+        now = time.time()
         with self._lock:
-            if self._proc is not None:
-                try:
-                    _ = self._proc.process_handle
-                    return self._proc
-                except Exception:
-                    self._proc = None
-                    self._module_cache.clear()
-            self._proc = self._wait_for_process()
+            proc = self._proc
+        if proc is not None:
+            # Живость проверяем не чаще _ALIVE_CHECK_INTERVAL (сисколл).
+            if now - self._alive_ts < _ALIVE_CHECK_INTERVAL:
+                return proc
+            if self._proc_alive(proc):
+                self._alive_ts = now
+                return proc
+            logutil.debug("[proc] процесс завершился - переподключаемся")
+            self.invalidate()
+        new_proc = self._wait_for_process()
+        with self._lock:
             self._module_cache.clear()
-            return self._proc
+            self._proc = new_proc
+        self._alive_ts = time.time()
+        return new_proc
 
     def ensure_module(self, module_name: str) -> int:
         key = module_name.lower()
@@ -77,9 +118,3 @@ class ProcessConnector:
                     pass
             self._proc = None
             self._module_cache.clear()
-
-    def process_handle(self) -> pymem.Pymem:
-        return self.ensure_process()
-
-    def module_base(self, module_name: str) -> int:
-        return self.ensure_module(module_name)

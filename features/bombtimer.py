@@ -283,7 +283,12 @@ def BombTimerThread(SharedBombState, SharedOffsets):
             time.sleep(SCAN_INTERVAL)
 
         except Exception as exc:
-            logutil.debug(f"[bombtimer] loop exception: {exc}")
-            _reset_state(SharedBombState)
-            connector.invalidate()
+            try:
+                if time.time() - _last_exc_ts >= 1.0:
+                    logutil.debug(f"[bombtimer] loop exception: {exc}")
+                    _reset_state(SharedBombState)
+                    connector.invalidate()
+                    _last_exc_ts = time.time()
+            except Exception:
+                _last_exc_ts = time.time()
             time.sleep(1)

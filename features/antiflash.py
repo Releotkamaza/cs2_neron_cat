@@ -59,8 +59,10 @@ def AntiFlashThreadFunction(Options, Offsets):
 
             # Перепроверка павна ПЕРЕД записью: между чтением и записью павн
             # может освободиться (смерть/загрузка карты/конец матча), запись
-            # тогда попадает в переиспользованную память. Та же страховка,
-            # что в fovchanger/bhop.
+            # тогда попадает в переиспользованную память. Та же страховка -
+            # в fovchanger (перечитывает dwLocalPlayerPawn перед записями) и
+            # nosmoke (_confirm_smoke); bhop она не нужна - он пишет в
+            # статический оффсет ButtonJump в client.dll, а не в павн.
             def _pawn_alive():
                 try:
                     return memfuncs.ProcMemHandler.ReadPointer(

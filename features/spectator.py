@@ -1,7 +1,5 @@
 import time
-import os
 from functions import memfuncs
-from functions import fontpaths
 from functions import logutil
 from functions.process_watcher import ProcessConnector
 
@@ -348,11 +346,37 @@ def SpectatorThreadFunction(Options, Offsets, Runtime):
             connector.invalidate()
             time.sleep(0.5)
 
+def panel_pos(sw, sh, block_w, block_h, pos_x_pct, pos_y_pct, default_x, default_y):
+    """Позиция панели оверлея. pos_x_pct/pos_y_pct - X/Y в % от свободного
+    места: 0 = левый/верхний край, 100 = правый/нижний (панель ЦЕЛИКОМ
+    внутри экрана) - та же семантика, что у панели "Активные функции"
+    (ActiveListPosX/Y, v8.4.6). None/недоступное значение -> легаси-позиция
+    (default_x/default_y - прежний жёсткий вид панели). Результат зажат в
+    экран (страховка при неточном block_w/block_h)."""
+    def _axis(v, free, default):
+        if v is None:
+            return int(default)
+        try:
+            p = int(v)
+        except Exception:
+            return int(default)
+        p = max(0, min(100, p))
+        return int(free * p / 100.0)
+
+    x = _axis(pos_x_pct, int(sw) - int(block_w), default_x)
+    y = _axis(pos_y_pct, int(sh) - int(block_h), default_y)
+    x = max(0, min(x, max(0, int(sw) - int(block_w))))
+    y = max(0, min(y, max(0, int(sh) - int(block_h))))
+    return x, y
+
+
 def render_spectator_block(
     pme,
     spectators,
     enabled=True,
     screen_size=None,
+    pos_x_pct=None,   # X в % (0=левый край, 100=правый); None = легаси-вид
+    pos_y_pct=None,   # Y в % (0=верх, 100=низ); None = легаси (по центру)
     font_path=None,   # мёртв (тело использует _fd/font_id); оставлен для
                       # совместимости вызова из esp/core - снос синхронно с core
     font_handle=None, # мёртв по той же причине
@@ -392,8 +416,8 @@ def render_spectator_block(
         block_w = max(220, pad_x * 2 + max_chars * 8)
         block_h = pad_y * 2 + title_size + 6 + (len(names) * line_height)
 
-        x = sw - block_w - 24
-        y = sh // 2 - block_h // 2
+        x, y = panel_pos(sw, sh, block_w, block_h, pos_x_pct, pos_y_pct,
+                         sw - block_w - 24, sh // 2 - block_h // 2)
 
         pme.draw_rectangle(x, y, block_w, block_h, cols["bg"])
         pme.draw_rectangle_lines(x, y, block_w, block_h, cols["border"], lineThick=1)

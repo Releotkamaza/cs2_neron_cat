@@ -2,80 +2,12 @@ import logging
 import pymem
 from ext.datatypes import *
 from functions import memfuncs, calculations, gameinput
+from features import nosmoke
 import globals
 import time
 
 def is_valid_address(address):
 	return address is not None and 0x10000 < address < 0x7FFFFFFFFFFF
-
-def GetPlayers(processHandle, clientBaseAddress, LocalPlayer, AimBoneID, Options, Offsets):
-	entities = []
-	try:
-		EntityList = memfuncs.ProcMemHandler.ReadPointer(processHandle, clientBaseAddress + Offsets.offset.dwEntityList)
-	except Exception as e:
-		return entities
-
-	for i in range(64):
-		try:
-			tempEntity = Entity()
-
-			ListEntry = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
-			if not is_valid_address(ListEntry):
-				continue
-
-			currentController = memfuncs.ProcMemHandler.ReadPointer(processHandle, ListEntry + 112 * (i & 0x1FF))
-			if not is_valid_address(currentController):
-				continue
-
-			pawnHandle = memfuncs.ProcMemHandler.ReadInt(processHandle, currentController + Offsets.offset.m_hPlayerPawn)
-			if pawnHandle == 0:
-				continue
-
-			ListEntry2 = memfuncs.ProcMemHandler.ReadPointer(processHandle, EntityList + 0x8 * ((pawnHandle & 0x7FFF) >> 9) + 0x10)
-			if not is_valid_address(ListEntry2):
-				continue
-
-			currentPawn = memfuncs.ProcMemHandler.ReadPointer(processHandle, ListEntry2 + 0x70 * (pawnHandle & 0x1FF))
-			if not is_valid_address(currentPawn) or currentPawn == LocalPlayer.pawnAddress:
-				continue
-
-			sceneNode = memfuncs.ProcMemHandler.ReadPointer(processHandle, currentPawn + Offsets.offset.m_pGameSceneNode)
-			boneMatrix = memfuncs.ProcMemHandler.ReadPointer(processHandle, sceneNode + Offsets.offset.m_modelState + 0x80)
-			tempEntity.HeadPos = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (AimBoneID * 32))
-			tempEntity.origin = memfuncs.ProcMemHandler.ReadVec(processHandle, currentPawn + Offsets.offset.m_vOldOrigin)
-
-			ViewMatrix = memfuncs.ProcMemHandler.ReadMatrix(processHandle, clientBaseAddress + Offsets.offset.dwViewMatrix)
-			tempEntity.head2d = calculations.world_to_screen(ViewMatrix, tempEntity.HeadPos)
-
-			ScreenVec = Vector2(globals.SCREEN_WIDTH / 2, globals.SCREEN_HEIGHT / 2)
-			tempEntity.pixelDistance = calculations.distance_vec2(tempEntity.head2d, ScreenVec)
-
-			if tempEntity.pixelDistance >= Options["AimbotFOV"]:
-				continue
-
-			tempEntity.Distance = calculations.distance_vec3(tempEntity.origin, LocalPlayer.origin)
-
-			lifestate = memfuncs.ProcMemHandler.ReadInt(processHandle, currentPawn + Offsets.offset.m_lifeState)
-			spotted = memfuncs.ProcMemHandler.ReadInt(processHandle, currentPawn + Offsets.offset.m_entitySpottedState + Offsets.offset.m_bSpotted)
-			team = memfuncs.ProcMemHandler.ReadInt(processHandle, currentPawn + Offsets.offset.m_iTeamNum)
-
-			if Options["EnableAimbotVisibilityCheck"] and not spotted:
-				continue
-			if lifestate != 256:  
-				continue
-			if Options["EnableAimbotTeamCheck"] and LocalPlayer.Team == team:
-				continue
-
-			entities.append(tempEntity)
-
-		except pymem.exception.MemoryReadError as e:
-			logging.debug(f"[Player {i}] Memory read failed: {e}")
-			continue
-		except Exception as e:
-			logging.error(f"[Player {i}] Unexpected error: {e}")
-			continue
-
-	return entities
 
 def ResolveBoneToID(selectedIndex):
 	match selectedIndex:
@@ -92,7 +24,7 @@ def ResolveBoneToID(selectedIndex):
 
 
 _last_update_time = time.perf_counter()
-def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HANDLE):
+def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, Runtime=None):
 	m_flIntervalPerTick = 0.015625
 	global _last_update_time
 	try:
@@ -158,6 +90,30 @@ def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HA
 				boneMatrix = memfuncs.ProcMemHandler.ReadPointer(processHandle, sceneNode + Offsets.offset.m_modelState + 0x80)
 				headPos = memfuncs.ProcMemHandler.ReadVec(processHandle, boneMatrix + (AimBoneID * 32))
 				origin = memfuncs.ProcMemHandler.ReadVec(processHandle, pawn + Offsets.offset.m_vOldOrigin)
+
+				# Смок перекрывает линию глаз->голова: цель считается
+				# невидимой, даже если серверная маска засвета её отдала.
+				# Проверка смока имеет смысл только если дым нарисован.
+				# При NoSmoke дым убран визуально - цель для игрока видима.
+				if (Options["EnableAimbotVisibilityCheck"] and localIndex > 0
+						and Runtime is not None
+						and not Options.get("EnableNoSmoke", False)):
+					_smokes = None
+					try:
+						_smokes = getattr(Runtime, "smokes", None)
+					except Exception:
+						_smokes = None
+					if _smokes:
+						try:
+							_eye = Vector3(localOrigin.x + localView.x,
+							               localOrigin.y + localView.y,
+							               localOrigin.z + localView.z)
+							if calculations.smoke_blocks_segment(
+									_eye, headPos, _smokes, nosmoke.SMOKE_RADIUS,
+									now=time.time()):
+								continue
+						except Exception:
+							pass
 
 				if Options["EnableAimbotPrediction"]:
 					ticks_passed = frame_time / m_flIntervalPerTick
@@ -232,10 +188,7 @@ def Aimbot_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HA
 
 			nextPos = Vector2(currentMouse.x + moveX, currentMouse.y + moveY)
 
-			if ARDUINO_HANDLE is not None:
-				gameinput.moveMouseToLocationArdunio(nextPos, handle=ARDUINO_HANDLE)
-			else:
-				gameinput.moveMouseToLocation(nextPos)
+			gameinput.moveMouseToLocation(nextPos)
 		globals.RCS_CTRL_BY_AIMBOT = False
 
 	except pymem.exception.MemoryReadError as e:

@@ -33,14 +33,6 @@ def info(msg: str) -> None:
             pass
 
 
-def warning(msg: str) -> None:
-    if _DEBUG_ENABLED:
-        try:
-            print(msg, file=sys.stderr)
-        except Exception:
-            pass
-
-
 def error(msg: str) -> None:
     try:
         print(msg, file=sys.stderr)

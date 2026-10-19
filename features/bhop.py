@@ -31,8 +31,19 @@ JUMP_IDLE = 256
 # вообще не увидит (дефект прошлой версии: 8 мс окно при тике 15.6 мс).
 # 17 мс = тик + запас на джиттер цикла: эдж гарантированно накрывает
 # хотя бы одну сборку usercmd.
-EDGE_HOLD = 0.016        # главный эдж живёт один тик
-REEDGE_HALF = 0.017      # полупериод волны страховки (> тика!)
+# Микро-рандомизация: снижает предсказуемость паттерна (msg 385 counter-strafe telemetry)
+EDGE_HOLD_BASE = 0.016        # главный эдж живёт один тик
+REEDGE_HALF_BASE = 0.017      # полупериод волны страховки (> тика!)
+EDGE_HOLD_JITTER = 0.0008     # ±0.8мс
+REEDGE_HALF_JITTER = 0.0009   # ±0.9мс
+
+def _edge_hold():
+    return EDGE_HOLD_BASE + random.uniform(-EDGE_HOLD_JITTER, EDGE_HOLD_JITTER)
+
+def _reedge_half():
+    # минимально > TICK (0.015625) после джиттера
+    v = REEDGE_HALF_BASE + random.uniform(-REEDGE_HALF_JITTER, REEDGE_HALF_JITTER)
+    return max(v, 0.0160)
 
 # Структурные константы entity-листа (в дампах их нет по определению)
 ENT_BUCKET_STEP = 0x8
@@ -179,7 +190,8 @@ class StrafeEngine:
         theta = math.degrees(math.asin(ratio))
         theta = max(0.5, min(theta, float(opts.get("BhopStrafeMaxAngle", 4.0))))
         # лёгкий человеческий шум: ползунок Безье управляет формой хода мыши
-        theta += random.uniform(-0.08, 0.08) * theta
+        # микро-джиттер для снижения периодичности (безопасен)
+        theta += random.uniform(-0.10, 0.10) * theta
 
         # камера на theta впереди вектора скорости со стороны стрейфа
         desired = _norm_angle(vel_yaw - s * theta)
@@ -192,7 +204,11 @@ class StrafeEngine:
         self.key_vk = vk
 
         speed_mult = max(0.3, min(3.0, float(opts.get("BhopStrafeSpeed", 1.0))))
-        self.release_time = now + (TICK / speed_mult)
+        hold = (TICK / speed_mult)
+        hold += random.uniform(-0.0005, 0.0005)  # ±0.5мс микро-джиттер
+        if hold < 0.012:
+            hold = 0.012
+        self.release_time = now + hold
         self.state = "hold"
         return counts
 
@@ -234,11 +250,6 @@ class JumpTiming:
         except Exception:
             pass
 
-    def reset_counters(self):
-        self.cnt_edge = 0
-        self.cnt_reedge = 0
-        self.cnt_air = 0
-
     def update(self, processHandle, jump_addr, space_held, on_ground, now):
         """Возвращает записанное значение. mode - для дебага."""
         self.prev_mode = self.mode
@@ -270,16 +281,18 @@ class JumpTiming:
             return JUMP_PRESS
 
         dt = now - self.landed_ts
-        if dt < EDGE_HOLD:
+        eh = _edge_hold()
+        rh = _reedge_half()
+        if dt < eh:
             # Держим главный эдж до конца тика
             self.mode = "edge"
             memfuncs.ProcMemHandler.WriteInt(processHandle, jump_addr, JUMP_PRESS)
             return JUMP_PRESS
 
         # Страховка: волна с полупериодом > тика. Фаза от момента приземления.
-        # k нечётный -> 65537 (эдж живёт REEDGE_HALF > тик - гарантированно
+        # k нечётный -> 65537 (эдж живёт rh > тик - гарантированно
         # попадает в сборку usercmd), k чётный -> 256 (сброс между эджами).
-        k = int((dt - EDGE_HOLD) / REEDGE_HALF)
+        k = int((dt - eh) / rh)
         if k % 2 == 1:
             self.mode = "reedge"
             self.cnt_reedge += 1
@@ -388,6 +401,17 @@ def BhopThreadFunction(Options, Offsets):
     connector = ProcessConnector("cs2.exe", modules=["client.dll"])
     engine = StrafeEngine()
     timing = JumpTiming()
+
+    # ButtonJump - статический оффсет кнопки прыжка в client.dll и
+    # ЕДИНСТВЕННАЯ цель записи в bhop. Если его нет в дампе, jump_addr
+    # выродился бы в clientBaseAddress+0 (заголовок образа client.dll) -
+    # запись туда повредила бы модуль и уронила игру. Лучше не работать.
+    if not int(getattr(Offsets.offset, "ButtonJump", 0) or 0):
+        print("[bhop] нет оффсета ButtonJump в дампе - модуль отключён. "
+              "Обнови output/ (запусти CS2, потом cs2-dumper -f json)", flush=True)
+        while True:
+            time.sleep(5)
+        return
 
     local_opts = dict(Options.items())
     opts_ts = time.time()

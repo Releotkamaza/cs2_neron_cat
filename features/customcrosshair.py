@@ -2,7 +2,6 @@ import json
 import os
 import time
 
-import globals
 from functions import memfuncs
 from functions import calculations
 from features import noscopedot
@@ -175,17 +174,13 @@ def _alive(proc, lp, o):
     return False
 
 
-def _dot_takes_priority(cfg, proc, client, lp, o):
-    """True - сейчас рисуется точка noscopedot, кастомный молчит.
-    Зум/жив уже проверены вызывающим (у точки те же гейты), осталось
-    'swap включен И точка включена И снайперка в руках'. Резолв оружия
-    - единый источник noscopedot (_get_schema/_weapon_index), кэш
-    по handle общий, двойных чтений нет. Нет схемы -> 'не снайперка'
-    -> кастомный рисует (точка при этом честно молчит). Флаги приходят
-    из cfg-кэша (features/esp/static.py перечитывает их по таймеру)."""
-    if not cfg.get("dot_sep"):
-        return False
-    if not cfg.get("dot_on"):
+def _noscope_no_crosshair(cfg, proc, client, lp, o):
+    """True - сейчас ноускоп (снайперка в руках, не в зуме) и режим
+    NoScopeCrosshairMode != "Кастомный": крест рисовать нельзя. Резолв
+    оружия - единый источник noscopedot (_get_schema/_weapon_index), кэш
+    по handle общий, двойных чтений нет. Нет схемы -> "не снайперка" ->
+    крест рисуется. Флаг режима приходит из cfg-кэша."""
+    if str(cfg.get("noscope_mode", "Выкл") or "Выкл") == "Кастомный":
         return False
     res = noscopedot._weapon_index(proc, client, lp, o, noscopedot._get_schema())
     if res is None:
@@ -232,8 +227,7 @@ def build_cfg(Options):
         "outline": bool(Options.get("Crosshair_Outline", True)),
         "tshape": _is_tshape(Options),
         "enabled": bool(Options.get("EnableCustomCrosshair", False)),
-        "dot_sep": bool(Options.get("EnableNoScopeDotSeparate", False)),
-        "dot_on": bool(Options.get("EnableNoScopeDot", False)),
+        "noscope_mode": str(Options.get("NoScopeCrosshairMode", "Выкл") or "Выкл"),
     }
 
 
@@ -246,11 +240,7 @@ def refresh_flags(cfg, Options):
     except Exception:
         pass
     try:
-        cfg["dot_sep"] = bool(Options.get("EnableNoScopeDotSeparate", False))
-    except Exception:
-        pass
-    try:
-        cfg["dot_on"] = bool(Options.get("EnableNoScopeDot", False))
+        cfg["noscope_mode"] = str(Options.get("NoScopeCrosshairMode", "Выкл") or "Выкл")
     except Exception:
         pass
     return cfg
@@ -284,9 +274,12 @@ def draw_cfg(pme, processHandle, clientBaseAddress, Offsets, cfg):
         except Exception:
             pass
         # Если живы - не рисуем в зуме
-        if _is_zoomed(processHandle, lp, o) and _alive(processHandle, lp, o):
+        zoomed = _is_zoomed(processHandle, lp, o)
+        if zoomed and _alive(processHandle, lp, o):
             return
-        if _dot_takes_priority(cfg, processHandle, clientBaseAddress, lp, o):
+        # Ноускоп (снайперка без прицела): режим решает, что показать.
+        # "Кастомный" - этот крест; "Точка"/"Выкл" - крест молчит.
+        if not zoomed and _noscope_no_crosshair(cfg, processHandle, clientBaseAddress, lp, o):
             return
 
         col = _fade(pme, cfg["hexc"], cfg["op01"])

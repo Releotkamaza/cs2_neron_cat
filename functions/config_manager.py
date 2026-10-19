@@ -104,9 +104,6 @@ class ConfigManager:
         except Exception:
             return {}
 
-    def get_bind(self, name):
-        return int(self._read_binds().get(name, 0) or 0)
-
     def set_bind(self, name, vk):
         """vk=0 снимает бинд. False - имя невалидно."""
         name = sanitize_name(name)
@@ -149,6 +146,27 @@ def apply_profile(name, cfgmgr, Options, SharedFlags=None, local_opts=None):
     except Exception as e:
         logutil.debug(f"[config] apply '{name}' options update failed: {e}")
         return False
+    # v7: старые bool-ключи профиля -> мультипозиционные режимы и обратная
+    # синхронизация производных, чтобы режим и bool-ключи не расходились.
+    try:
+        if "NoScopeCrosshairMode" not in data and ("EnableNoScopeDot" in data or "EnableNoScopeDotSeparate" in data):
+            if data.get("EnableNoScopeDot"):
+                Options["NoScopeCrosshairMode"] = "Точка"
+            elif data.get("EnableNoScopeDotSeparate"):
+                Options["NoScopeCrosshairMode"] = "Кастомный"
+            else:
+                Options["NoScopeCrosshairMode"] = "Выкл"
+        if "TriggerbotMode" not in data and "EnableTriggerbot" in data:
+            Options["TriggerbotMode"] = ("Releotkamaza" if data.get("TriggerbotWallbang")
+                                         else "SadraKhorami") if data.get("EnableTriggerbot") else "Выкл"
+        _nsm = str(Options.get("NoScopeCrosshairMode", "Выкл") or "Выкл")
+        Options["EnableNoScopeDot"] = (_nsm == "Точка")
+        Options["EnableNoScopeDotSeparate"] = _nsm in ("Кастомный", "Точка")
+        _tbm = str(Options.get("TriggerbotMode", "SadraKhorami") or "SadraKhorami")
+        Options["EnableTriggerbot"] = _tbm != "Выкл"
+        Options["TriggerbotWallbang"] = _tbm == "Releotkamaza"
+    except Exception:
+        pass
     if local_opts is not None:
         try:
             local_opts.update(data)

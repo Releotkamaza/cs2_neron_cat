@@ -2,21 +2,7 @@ import struct
 import ctypes
 import threading
 
-import pymem
-from pymem.process import module_from_name
 from ext.datatypes import *
-
-def GetProcess(procname):
-    proc = pymem.Pymem(procname)
-    return proc
-
-def GetModuleBase(modulename: str, process_object: pymem.Pymem):
-    if not modulename or not process_object:
-        return None
-    module = module_from_name(process_object.process_handle, modulename)
-    if module:
-        return module.lpBaseOfDll
-    return None
 
 # ==================== Быстрый слой чтения ====================
 # Прямой ReadProcessMemory вместо pymem-обвязки: чтение - самое горячее
@@ -77,16 +63,8 @@ class ProcMemHandler:
         return struct.unpack_from('<i', _rpm_buf(proc.process_handle, address, 4), 0)[0]
 
     @staticmethod
-    def ReadLong(proc, address):
-        return struct.unpack_from('<q', _rpm_buf(proc.process_handle, address, 8), 0)[0]
-
-    @staticmethod
     def ReadFloat(proc, address):
         return struct.unpack_from('<f', _rpm_buf(proc.process_handle, address, 4), 0)[0]
-
-    @staticmethod
-    def ReadDouble(proc, address):
-        return struct.unpack_from('<d', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadVec(proc, address):
@@ -95,20 +73,12 @@ class ProcMemHandler:
         return Vector3(x, y, z)
 
     @staticmethod
-    def ReadShort(proc, address):
-        return struct.unpack_from('h', _rpm_buf(proc.process_handle, address, 2), 0)[0]
-
-    @staticmethod
     def ReadUShort(proc, address):
         return struct.unpack_from('H', _rpm_buf(proc.process_handle, address, 2), 0)[0]
 
     @staticmethod
     def ReadUInt(proc, address):
         return struct.unpack_from('<I', _rpm_buf(proc.process_handle, address, 4), 0)[0]
-
-    @staticmethod
-    def ReadULong(proc, address):
-        return struct.unpack_from('Q', _rpm_buf(proc.process_handle, address, 8), 0)[0]
 
     @staticmethod
     def ReadBool(proc, address):
@@ -128,11 +98,6 @@ class ProcMemHandler:
             return "?"
 
     @staticmethod
-    def ReadChar(proc, address):
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 2)
-        return struct.unpack('c', bytes_)[0].decode('utf-8')
-
-    @staticmethod
     def ReadMatrix(proc, address):
         bytes_ = ProcMemHandler.ReadBytes(proc, address, 4 * 16)
         matrix = struct.unpack('16f', bytes_)
@@ -144,64 +109,13 @@ class ProcMemHandler:
         return matrix
 
     @staticmethod
-    def ReadMatrix3x4(proc, address):
-        """Read a 3x4 transform matrix (row-major) commonly used for nodeToWorld."""
-        bytes_ = ProcMemHandler.ReadBytes(proc, address, 4 * 12)
-        return struct.unpack('12f', bytes_)
-
-    @staticmethod
-    def ReadNodeToWorldPosition(proc, address):
-        """Return translation component of a 3x4 nodeToWorld matrix as Vector3."""
-        try:
-            m = ProcMemHandler.ReadMatrix3x4(proc, address)
-            return Vector3(m[3], m[7], m[11])
-        except Exception:
-            return Vector3(0.0, 0.0, 0.0)
-
-    @staticmethod
     def WriteInt(proc, address, value):
         return proc.write_int(address, value)
-
-    @staticmethod
-    def WriteShort(proc, address, value):
-        bytes_ = struct.pack('h', value)
-        return ProcMemHandler.WriteBytes(proc, address, bytes_)
-
-    @staticmethod
-    def WriteUShort(proc, address, value):
-        bytes_ = struct.pack('H', value)
-        return ProcMemHandler.WriteBytes(proc, address, bytes_)
-
-    @staticmethod
-    def WriteUInt(proc, address, value):
-        return proc.write_uint(address, value)
-
-    @staticmethod
-    def WriteLong(proc, address, value):
-        return proc.write_longlong(address, value)
-
-    @staticmethod
-    def WriteULong(proc, address, value):
-        bytes_ = struct.pack('Q', value)
-        return ProcMemHandler.WriteBytes(proc, address, bytes_)
 
     @staticmethod
     def WriteFloat(proc, address, value):
         return proc.write_float(address, value)
 
     @staticmethod
-    def WriteDouble(proc, address, value):
-        return proc.write_double(address, value)
-
-    @staticmethod
     def WriteBool(proc, address, value):
         return proc.write_bool(address, value)
-
-    @staticmethod
-    def WriteString(proc, address, value):
-        return proc.write_string(address, value)
-
-    @staticmethod
-    def WriteVec(proc, address, value):
-        bytes_ = struct.pack('fff', value.x, value.y, value.z)
-        return ProcMemHandler.WriteBytes(proc, address, bytes_)

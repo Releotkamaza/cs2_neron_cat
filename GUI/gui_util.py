@@ -2,7 +2,7 @@ import ctypes
 import ctypes.wintypes  # ОБЯЗАТЕЛЬНО явно: ctypes.wintypes не подгружается
                         # сам с ctypes - раньше работало только случайно,
                         # пока какой-то из импортов main тянул подмодуль
-import win32api, win32gui, win32con
+import win32gui, win32con
 
 from functions import logutil
 

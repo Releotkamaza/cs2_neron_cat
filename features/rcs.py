@@ -7,7 +7,7 @@ import win32gui
 oldPunch_x = 0.0
 oldPunch_y = 0.0
 
-def RecoilControl_Update(processHandle, clientBaseAddress, Offsets, Options, ARDUINO_HANDLE):
+def RecoilControl_Update(processHandle, clientBaseAddress, Offsets, Options):
 	global oldPunch_x, oldPunch_y
 
 	try:
@@ -50,10 +50,7 @@ def RecoilControl_Update(processHandle, clientBaseAddress, Offsets, Options, ARD
 			smoothedMove = Vector2(delta.x / smoothFactor, delta.y / smoothFactor)
 			nextMouse = Vector2(currentMouse.x + smoothedMove.x, currentMouse.y + smoothedMove.y)
 
-			if ARDUINO_HANDLE is not None:
-				gameinput.moveMouseToLocationArdunio(nextMouse, handle=ARDUINO_HANDLE)
-			else:
-				gameinput.moveMouseToLocation(nextMouse)
+			gameinput.moveMouseToLocation(nextMouse)
 
 			oldPunch_x = aimPunch_x
 			oldPunch_y = aimPunch_y

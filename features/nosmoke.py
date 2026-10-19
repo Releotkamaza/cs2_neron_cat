@@ -32,11 +32,30 @@ HANDLE_IDX_MASK = 0x1FF
 SMOKE_CLASS_NAME = "smokegrenade_projectile"
 
 # --- Маркер смока на оверлее (дизайн-константы, не оффсеты) ---
+# SMOKE_RADIUS обязан совпадать с одноимённой константой в
+# functions/calculations.py (она участвует в проверке видимости):
+# правки делать в обоих файлах одной парой.
 SMOKE_RADIUS    = 128.0          # радиус смока в юнитах CS2
 RING_POINTS     = 16             # точек на нижней окружности
 TOP_ELEV_DEG    = 45.0           # высота боковых верхних точек
 TOP_AZIMUTH_DEG = (45.0, 135.0, 225.0, 315.0)
 MARKER_COLOR    = "#9FB6DE"
+
+# Время от детонации до НАЧАЛА рассеивания (конец плотной фазы дыма) -
+# решение юзера 2026-10-07: таймер показывает время до рассеивания,
+# значение 18.0 оставлено, т.к. подтверждено другими данными:
+# - источники: Liquipedia ("full effect lasts 18 seconds"), Fandom,
+#   scope.gg, swap.gg ("CS2 kept the same 18-second duration") = 18;
+#   миноритарные ~20 (reddit/CSDB) считали с учётом рассеивания;
+# - живой замер юзера согласуется: маркер ESP пропадает через 22.15 с
+#   от детонации (остаток после "0.0" = 4.17/4.14 с - точные замеры;
+#   4.69/4.7 завышены, юзер нажал раньше нуля), т.е. плотная фаза 18 +
+#   рассеивание ~4 с = полное время жизни сущности 22.15.
+# Поведение (осознанно принятый компромисс): "0.0" = дым начал
+# рассеиваться, маркер ESP живёт ещё ~4 с до полного исчезновения
+# (юзер: "ЕСП смока пропадает лишь когда смок пропадает полностью").
+# Рандомизации длительности нет - замер детерминированный.
+SMOKE_LIFETIME_SEC = 18.0
 
 # Как часто обновлять локальную копию настройки (Options - IPC-прокси)
 OPTS_REFRESH = 0.5
@@ -182,6 +201,16 @@ def rd_int(h, addr):
         return 0
 
 
+def rd_float(h, addr):
+    try:
+        v = float(memfuncs.ProcMemHandler.ReadFloat(h, addr))
+        if v != v:  # NaN - мусор чтения
+            return 0.0
+        return v
+    except Exception:
+        return 0.0
+
+
 def rd_bytes(h, addr, n):
     try:
         return memfuncs.ProcMemHandler.ReadBytes(h, addr, n)
@@ -244,6 +273,12 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
     did_off  = _off(off, "m_bDidSmokeEffect")
     pos_off  = _off(off, "m_vSmokeDetonationPos")
     name_off = _off(off, "m_designerName")
+    # Временные поля для компенсации полёта гранаты: детонация =
+    # спаун + (m_flDetonateTime - m_flSpawnTime); оба есть в дампе
+    # (наследуются: m_flDetonateTime от C_BaseGrenade, m_flSpawnTime
+    # от C_BaseCSGrenadeProjectile). Нет полей -> таймер без компенсации.
+    det_off   = _off(off, "m_flDetonateTime")
+    spawn_off = _off(off, "m_flSpawnTime")
 
     # Деградация: нет полей смока в дампе - модуль фактически не работает
     if not did_off or not pos_off or not name_off:
@@ -251,21 +286,44 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
               "Обнови output/ (запусти CS2, потом cs2-dumper -f json)", flush=True)
 
     enable_local = bool(Options.get("EnableNoSmoke", False))
+    # Список смоков нужен ещё и проверке видимости (ESP_VisibleCheckBox /
+    # EnableAimbotVisibilityCheck): она считает врага за дымом невидимым.
+    vis_check = (bool(Options.get("ESP_VisibleCheckBox", False))
+                 or bool(Options.get("EnableAimbotVisibilityCheck", False)))
     opts_ts = time.time()
+
+    # Отсчёт до деспавна смока: ключ - центр детонации (округлённый;
+    # константен всю жизнь сущности), значение - наше время time.time(),
+    # когда купол исчезнет = детонация + SMOKE_LIFETIME_SEC.
+    # Детонация в наших часах = первый_скан_сущности + полёт
+    # (см. блок расчёта t_end ниже): позиция m_vSmokeDetonationPos может
+    # быть валидна уже С БРОСКА (гипотеза, проверена симптомом юзера:
+    # таймер истекал раньше деспавна на время полёта гранаты).
+    t_end_by_pos = {}
+    # entity addr -> наш time.time() первого обнаружения (спаун-якорь
+    # для формулы детонации; погрешность <= SCAN_INTERVAL_SEC).
+    ent_first = {}
 
     while True:
         try:
             now = time.time()
             if now - opts_ts >= OPTS_REFRESH:
                 enable_local = bool(Options.get("EnableNoSmoke", False))
+                vis_check = (bool(Options.get("ESP_VisibleCheckBox", False))
+                             or bool(Options.get("EnableAimbotVisibilityCheck", False)))
                 opts_ts = now
 
-            if not enable_local:
+            if not enable_local and not vis_check:
                 if Runtime is not None:
                     try:
                         Runtime.smokes = []
                     except Exception:
                         pass
+                # Ни подавление дыма, ни проверка видимости не нужны -
+                # накопленные ключи протухли бы (смоки деспавнились за время
+                # паузы); при повторном включении отсчёт начнётся заново.
+                t_end_by_pos.clear()
+                ent_first.clear()
                 time.sleep(0.25)
                 continue
 
@@ -285,6 +343,8 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
             max_idx = min(highest + 1, MAX_ENTITIES_CAP)
 
             smokes = []
+            alive_keys = set()
+            alive_ents = set()
             for i in range(1, max_idx):
                 entity = ent_by_index(hproc, entlist_ptr, i)
                 if not entity:
@@ -292,18 +352,29 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
                 if get_class_name(hproc, entity, name_off) != SMOKE_CLASS_NAME:
                     continue
 
-                # Подавление смока - всегда и для всех. Запись только после
-                # повторной перепроверки: в момент массового деспавна (загрузка/
-                # выход матча) слот entity-листа может отдать освобождённую или
-                # переиспользованную энтити - запись в неё роняет игру.
-                if did_off and not rd_bool(hproc, entity + did_off):
+                # Спаун-якорь: первый наш скан этой сущности (для формулы
+                # детонации). Адрес живой сущности константен; при
+                # переиспользовании слота прошлый якорь безвреден:
+                # условие t0+flight > now отсекает устаревший якорь.
+                if entity not in ent_first:
+                    ent_first[entity] = now
+                alive_ents.add(entity)
+
+                # Подавление смока - ТОЛЬКО когда NoSmoke включён. При
+                # скане ради проверки видимости (vis_check без enable_local)
+                # смоки лишь собираются в Runtime.smokes, памяти не трогаем.
+                # Запись только после повторной перепроверки: в момент массового
+                # деспавна (загрузка/выход матча) слот entity-листа может
+                # отдать освобождённую или переиспользованную энтити - запись
+                # в неё роняет игру.
+                if enable_local and did_off and not rd_bool(hproc, entity + did_off):
                     if _confirm_smoke(hproc, entlist_ptr, i, entity, name_off):
                         try:
                             memfuncs.ProcMemHandler.WriteBool(hproc, entity + did_off, True)
                         except Exception:
                             pass
 
-                # Центр для маркера
+                # Центр для маркера + отсчёт до деспавна
                 if not pos_off:
                     continue
                 try:
@@ -312,7 +383,41 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
                     pos = None
                 if pos is None or (abs(pos.x) <= 1.0 and abs(pos.y) <= 1.0):
                     continue
-                smokes.append([float(pos.x), float(pos.y), float(pos.z)])
+                key = (round(float(pos.x), 1), round(float(pos.y), 1),
+                       round(float(pos.z), 1))
+                if key not in t_end_by_pos:
+                    # Детонация в НАШИХ часах = спаун-якорь + полёт
+                    # (m_flDetonateTime - m_flSpawnTime). Формула max()
+                    # покрывает три случая: позиция валидна с броска
+                    # (t0+flight > now -> берём детонацию), позиция
+                    # появилась уже после детонации (t0+flight < now ->
+                    # берём now), фича включена посреди жизни смока
+                    # (тоже now). flight вне (0, 30) - мусор чтения,
+                    # отсчёт без компенсации (старое поведение).
+                    t_end = now + SMOKE_LIFETIME_SEC
+                    if det_off and spawn_off:
+                        flight = (rd_float(hproc, entity + det_off)
+                                  - rd_float(hproc, entity + spawn_off))
+                        t0 = ent_first.get(entity, now)
+                        if 0.0 < flight < 30.0 and t0 + flight > now:
+                            t_end = t0 + flight + SMOKE_LIFETIME_SEC
+                    t_end_by_pos[key] = t_end
+                alive_keys.add(key)
+                # 5-й элемент - время детонации в НАШИХ часах. Нужен
+                # проверке видимости: пока смок в полёте, купола нет, и
+                # линию видимости он перекрывать не должен.
+                smokes.append([float(pos.x), float(pos.y), float(pos.z),
+                               t_end_by_pos[key],
+                               t_end_by_pos[key] - SMOKE_LIFETIME_SEC])
+
+            # Чистка: сущности, не замеченные в этом цикле, деспавнились
+            # (или entity-лист пересоздан) - их ключи протухли.
+            for k in list(t_end_by_pos):
+                if k not in alive_keys:
+                    del t_end_by_pos[k]
+            for a in list(ent_first):
+                if a not in alive_ents:
+                    del ent_first[a]
 
             if Runtime is not None:
                 try:
@@ -323,8 +428,15 @@ def NoSmokeThreadFunction(Options, Offsets, Runtime=None):
             time.sleep(SCAN_INTERVAL_SEC)
 
         except Exception as exc:
-            logutil.debug(f"[nosmoke] loop exception: {exc}")
-            connector.invalidate()
+            try:
+                _last_exc_ts
+            except NameError:
+                _last_exc_ts = 0.0
+            now = time.time()
+            if now - _last_exc_ts >= 1.0:
+                logutil.debug(f"[nosmoke] loop exception: {exc}")
+                connector.invalidate()
+                _last_exc_ts = now
             time.sleep(0.5)
 
 
@@ -358,6 +470,15 @@ def render_smoke_markers(pme, processHandle, clientBase, off, smokes, screen_w, 
         return (sx, sy, w)
 
     R = SMOKE_RADIUS
+
+    # Ленивый импорт (вне пакета esp): draw_shadowed_label даёт обводку
+    # текста - единый с ESP рендер (plate/shadow по TEXT_OUTLINE_MODE).
+    _label = None
+    try:
+        from features.esp.draw import draw_shadowed_label as _label
+    except Exception:
+        _label = None
+
     for s in smokes:
         try:
             cx, cy, cz = float(s[0]), float(s[1]), float(s[2])
@@ -385,3 +506,24 @@ def render_smoke_markers(pme, processHandle, clientBase, off, smokes, screen_w, 
         c = _proj(cx, cy, cz)
         if c and 0 <= c[0] <= screen_w and 0 <= c[1] <= screen_h:
             pme.draw_circle(int(c[0]), int(c[1]), 3, color=col_far)
+
+            # Таймер до деспавна смока - НАД центральной точкой, с обводкой
+            # (s[3] = t_end, ставит сканер в NoSmokeThreadFunction).
+            # Остаток <= 0 не показываем: сущность уходит из списка в
+            # течение SCAN_INTERVAL, мелькание "0.0" не нужно.
+            t_end = None
+            try:
+                t_end = float(s[3])
+            except Exception:
+                t_end = None
+            if t_end is not None and _label is not None:
+                remain = t_end - time.time()
+                # Верх: полёт компенсируется в t_end (до +30 с), остаток
+                # на старте = полёт + LIFETIME; >50 - точно мусор.
+                if 0.0 < remain <= SMOKE_LIFETIME_SEC + 32.0:
+                    txt = "%.1f" % remain
+                    # Центрирование по точке: ширина - зеркало формулы
+                    # plate-подложки из draw.py (int(len*size*0.62)+4).
+                    w = int(len(txt) * 12 * 0.62) + 4
+                    _label(txt, c[0] - w * 0.5, c[1] - 12 - 6,
+                           size=12, color="#FFFFFF")

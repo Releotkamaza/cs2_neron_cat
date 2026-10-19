@@ -4,6 +4,7 @@ import math
 import os
 import time
 import ctypes
+import random
 import struct
 
 import win32api
@@ -12,6 +13,7 @@ import win32gui
 from functions import memfuncs
 from functions import gameinput
 from functions import logutil
+from functions import calculations
 from functions.process_watcher import ProcessConnector
 
 
@@ -82,9 +84,8 @@ def safe_read_vec(process, address):
 
 
 def read_head_center(process, boneMatrix):
-    """Центр головы. Bulk-чтение костей ОДНИМ RPM (было 4 чтения по 12 байт
-    на каждого кандидата автоволл-скана), семантика прежняя:
-    глаза -> голова(7) -> шея(6). Фоллбек - старый поштучный путь."""
+    """Центр головы как в ESP (_head_from): по глазам (25/26) + шее (6),
+    проекция вперёд по вектору neck->eye_mid, +3.0 по Z. Фоллбек на кость 7."""
     buf = None
     try:
         buf = memfuncs.ProcMemHandler.ReadBytes(process, boneMatrix, BONE_STRIDE * BONE_SPAN)
@@ -94,37 +95,35 @@ def read_head_center(process, boneMatrix):
         def _v(i):
             x, y, z = struct.unpack_from('<3f', buf, i * BONE_STRIDE)
             if math.isfinite(x) and math.isfinite(y) and math.isfinite(z):
-                return (x, y, z)
+                return Vector3(x, y, z)
             return None
-
-        le = _v(25)
-        re_ = _v(26)
-        if le is not None and re_ is not None:
-            return Vector3(
-                (le[0] + re_[0]) / 2.0,
-                (le[1] + re_[1]) / 2.0,
-                (le[2] + re_[2]) / 2.0
-            )
-        h = _v(7)
-        if h is not None:
-            return Vector3(h[0], h[1], h[2])
-        n = _v(6)
-        if n is not None:
-            return Vector3(n[0], n[1], n[2])
+        eye_l = _v(25); eye_r = _v(26); neck = _v(6); fb = _v(7)
+        if eye_l and eye_r and neck:
+            mx, my, mz = (eye_l.x + eye_r.x)/2.0, (eye_l.y + eye_r.y)/2.0, (eye_l.z + eye_r.z)/2.0
+            vx, vy, vz = mx - neck.x, my - neck.y, mz - neck.z
+            length = math.sqrt(vx*vx + vy*vy + vz*vz)
+            if length > 0.01:
+                return Vector3(mx - (vx/length)*4.0, my - (vy/length)*4.0, mz - (vz/length)*4.0 + 3.0)
+            if fb: return Vector3(fb.x, fb.y, fb.z)
+            return Vector3(mx, my, mz + 5.0)
+        if fb: return Vector3(fb.x, fb.y, fb.z)
+        if neck: return neck
         return None
-
-    left_eye = safe_read_vec(process, boneMatrix + 25 * BONE_STRIDE)
-    right_eye = safe_read_vec(process, boneMatrix + 26 * BONE_STRIDE)
-    if left_eye is not None and right_eye is not None:
-        return Vector3(
-            (left_eye.x + right_eye.x) / 2.0,
-            (left_eye.y + right_eye.y) / 2.0,
-            (left_eye.z + right_eye.z) / 2.0
-        )
-    head = safe_read_vec(process, boneMatrix + 7 * BONE_STRIDE)
-    if head is not None:
-        return head
-    return safe_read_vec(process, boneMatrix + 6 * BONE_STRIDE)
+    eye_l = safe_read_vec(process, boneMatrix + 25 * BONE_STRIDE)
+    eye_r = safe_read_vec(process, boneMatrix + 26 * BONE_STRIDE)
+    neck  = safe_read_vec(process, boneMatrix + 6  * BONE_STRIDE)
+    fb    = safe_read_vec(process, boneMatrix + 7  * BONE_STRIDE)
+    if eye_l and eye_r and neck:
+        mx,my,mz = (eye_l.x+eye_r.x)/2.0,(eye_l.y+eye_r.y)/2.0,(eye_l.z+eye_r.z)/2.0
+        vx,vy,vz = mx-neck.x,my-neck.y,mz-neck.z
+        length = math.sqrt(vx*vx+vy*vy+vz*vz)
+        if length > 0.01:
+            return Vector3(mx-(vx/length)*4.0, my-(vy/length)*4.0, mz-(vz/length)*4.0 + 3.0)
+        if fb: return fb
+        return Vector3(mx,my,mz+5.0)
+    if fb: return fb
+    if neck: return neck
+    return None
 
 
 def to_float(value, default=0.0):
@@ -149,37 +148,132 @@ def to_bool(value, default=False):
         return default
 
 
-def lerp_by_distance(d, points):
-    if not points:
-        return 0.1
-    if d <= points[0][0]:
-        return points[0][1]
-    for i in range(len(points) - 1):
-        d0, v0 = points[i]
-        d1, v1 = points[i + 1]
-        if d <= d1:
-            if d1 == d0:
-                return v1
-            return v0 + (d - d0) * (v1 - v0) / (d1 - d0)
-    return points[-1][1]
+# ==================== Реакция триггера (TriggerbotDelay*) ====================
+# Раньше это жило в functions/gameinput.py и там же была жёсткая таблица
+# TRIGGER_DELAY_STEPS. Убрано: gameinput отвечает только за импуты, режим и
+# таблицу задержки читает триггер. Никаких "запасных" кривых по дистанции -
+# если настроек нет, работает безопасный откат LEGACY (битые/неизвестные
+# данные не должны выглядеть как настройка пользователя).
+#
+# Внутренние id режимов пишет GUI (_config_combo_map): в конфиге строки,
+# в списке - русские подписи.
+DELAY_MODE_STATIC = "static"
+DELAY_MODE_RANGE = "range"
+DELAY_MODE_DISTANCE = "distance"
+
+# Верхняя граница полей задержки/таблицы в GUI, мс.
+DELAY_MS_MAX = 500.0
+
+# Откат (нет режима / пустая таблица / неизвестная дистанция).
+LEGACY_DELAY_MIN_MS = 1.0
+LEGACY_DELAY_MAX_MS = 17.0
 
 
-def calculate_angle(from_pos, to_pos):
-    dx = to_pos.x - from_pos.x
-    dy = to_pos.y - from_pos.y
-    dz = to_pos.z - from_pos.z
-    yaw = math.atan2(dy, dx) * 180.0 / math.pi
-    dist = math.sqrt(dx * dx + dy * dy)
-    pitch = -math.atan2(dz, dist) * 180.0 / math.pi
-    return (yaw, pitch)
+def _clamp_delay_ms(value, default=0.0):
+    """Мс с клампом в [0, DELAY_MS_MAX]. Мусор/None -> default."""
+    v = to_float(value, default)
+    if v < 0.0:
+        return 0.0
+    if v > DELAY_MS_MAX:
+        return DELAY_MS_MAX
+    return v
 
 
-def angle_difference(angle1, angle2):
-    yaw1, pitch1 = angle1
-    yaw2, pitch2 = angle2
-    diff_yaw = (yaw2 - yaw1 + 180) % 360 - 180
-    diff_pitch = (pitch2 - pitch1 + 180) % 360 - 180
-    return math.sqrt(diff_yaw * diff_yaw + diff_pitch * diff_pitch)
+def _norm_delay_range(lo, hi):
+    """(мин, макс) мс: переставленные границы меняются местами, обе
+    зажимаются в [0, DELAY_MS_MAX]."""
+    a = _clamp_delay_ms(lo, 0.0)
+    b = _clamp_delay_ms(hi, 0.0)
+    return (a, b) if a <= b else (b, a)
+
+
+def _table_row(row):
+    """Строка таблицы -> (даль,от,даль,от) или None, если строка битая.
+    Границы диапазонов и задержек упорядочиваются."""
+    try:
+        d0 = max(0.0, to_float(row[0], 0.0))
+        d1 = max(0.0, to_float(row[1], 0.0))
+        ms0, ms1 = _norm_delay_range(row[2], row[3])
+    except (TypeError, IndexError, KeyError):
+        return None
+    if d0 > d1:
+        d0, d1 = d1, d0
+    return (d0, d1, ms0, ms1)
+
+
+def _table_row_for_distance(table, distance):
+    """Строка таблицы для дистанции (юниты).
+
+    Правило: точное попадание в [от, до), иначе - БЛИЖАЙШИЙ по расстоянию
+    промежуток: дистанция ниже первой строки -> первая, выше последней ->
+    последняя, дно в дыру -> ближайший край. Так дальность всегда даёт
+    строку, пока таблица не пуста.
+    """
+    rows = []
+    for row in table:
+        r = _table_row(row) if isinstance(row, (list, tuple)) else None
+        if r is not None:
+            rows.append(r)
+    if not rows:
+        return None
+    try:
+        d = max(0.0, float(distance))
+    except (TypeError, ValueError):
+        return None
+    for r in rows:
+        if r[0] <= d < r[1]:
+            return r
+    best = rows[0]
+    best_gap = None
+    for r in rows:
+        if d < r[0]:
+            gap = r[0] - d
+        elif d > r[1]:
+            gap = d - r[1]
+        else:
+            gap = 0.0
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            best = r
+    return best
+
+
+def resolve_trigger_delay(opts, distance=None):
+    """Задержка (мс) перед выстрелом: чтобы реакция была точной.
+
+    Режимы конфига TriggerbotDelayMode:
+      "static"   - постоянная TriggerbotDelayStatic, мс;
+      "range"    - случайная из [TriggerbotDelayMin, TriggerbotDelayMax], мс;
+      "distance" - случайная из строки TriggerbotDelayTable по дистанции.
+    Откат (неизвестный режим, пустая/битая таблица, нет дистанции) -
+    LEGACY_DELAY_MIN_MS..LEGACY_DELAY_MAX_MS.
+    """
+    try:
+        mode = str(opts.get("TriggerbotDelayMode", DELAY_MODE_DISTANCE) or "")
+    except Exception:
+        mode = ""
+
+    if mode == DELAY_MODE_STATIC:
+        return _clamp_delay_ms(opts.get("TriggerbotDelayStatic", 50.0), 50.0)
+
+    if mode == DELAY_MODE_RANGE:
+        lo, hi = _norm_delay_range(
+            opts.get("TriggerbotDelayMin", LEGACY_DELAY_MIN_MS),
+            opts.get("TriggerbotDelayMax", LEGACY_DELAY_MAX_MS),
+        )
+        return random.uniform(lo, hi)
+
+    if mode == DELAY_MODE_DISTANCE and distance is not None:
+        try:
+            table = opts.get("TriggerbotDelayTable") or []
+        except Exception:
+            table = []
+        if isinstance(table, (list, tuple)) and len(table) > 0:
+            row = _table_row_for_distance(table, distance)
+            if row is not None:
+                return random.uniform(row[2], row[3])
+
+    return random.uniform(LEGACY_DELAY_MIN_MS, LEGACY_DELAY_MAX_MS)
 
 
 # ==================== Оффсеты из дампа (без хардкода) ====================
@@ -233,7 +327,7 @@ def _schema_fields_flat():
 _SCHEMA = _schema_fields_flat()
 
 
-def TriggerbotThreadFunction(Options, Offsets):
+def TriggerbotThreadFunction(Options, Offsets, Runtime=None):
     # Точность sleep: без этого time.sleep(0.005) на деле 5-15.6 мс
     # (гранулярность системного таймера Windows). 1 мс делает каденцию
     # предсказуемой. Действует, пока процесс воркера жив, при выходе
@@ -319,18 +413,6 @@ def TriggerbotThreadFunction(Options, Offsets):
         print(msg)
         logutil.debug(msg)
 
-    # FOV автоволла - всегда адаптивный
-    wallbang_fov_points = [
-        (0.0, 2.1),
-        (120.0, 1.5),
-        (250.0, 1.2),
-        (450.0, 0.7),
-        (700.0, 0.45),
-        (1000.0, 0.3),
-        (1500.0, 0.15),
-        (3000.0, 0.1),
-    ]
-
     # 5 мс каденция: средняя задержка реакции на появление цели ~2.5 мс.
     # Чтений в цикле - единицы, CPU-цена нулевая (timeBeginPeriod выше).
     LOOP_SLEEP = 0.005
@@ -404,7 +486,9 @@ def TriggerbotThreadFunction(Options, Offsets):
                 time.sleep(LOOP_SLEEP)
                 continue
 
-            team_check = to_bool(opts.get("EnableTriggerbotTeamCheck", False), False) and bool(o_team)
+            # Проверка команды: при наличии оффсета блокируем тиммейта.
+            # Опция EnableTriggerbotTeamCheck используется если задана в конфиге.
+            team_check = to_bool(opts.get("EnableTriggerbotTeamCheck", True), True) and bool(o_team)
             require_ground = to_bool(opts.get("TriggerbotRequireGround", True), True) and bool(o_flags)
             speed_threshold = to_float(opts.get("TriggerbotSpeedThreshold", 5.0), 5.0) if o_velocity else 0.0
 
@@ -424,11 +508,16 @@ def TriggerbotThreadFunction(Options, Offsets):
                 )
                 wallbang_mode = True
 
-            shot_delay = to_float(opts.get("TriggerbotShotDelay", 0.4), 0.4)
+            # TriggerbotShotDelayMs - минимальный интервал между выстрелами
+            # в МС (ползунок «Задержка между выстрелами» в субвкладке).
+            shot_ms = max(0.0, to_float(opts.get("TriggerbotShotDelayMs", 400.0), 400.0))
 
             target = None
             target_hp = 0
             target_dist = 0.0
+            # Точка цели для проверки видимости через дым: у обычного режима
+            # это m_vOldOrigin, у автоволла - центр головы.
+            target_pos = None
 
             if not wallbang_mode:
                 # ОБЫЧНЫЙ режим: через m_iIDEntIndex
@@ -449,13 +538,14 @@ def TriggerbotThreadFunction(Options, Offsets):
                                     target_hp = hp
                                     t_origin = safe_read_vec(process, maybe_target + o_origin)
                                     if t_origin is not None:
+                                        target_pos = t_origin
                                         target_dist = math.sqrt(
                                             (t_origin.x - local_origin.x) ** 2 +
                                             (t_origin.y - local_origin.y) ** 2 +
                                             (t_origin.z - local_origin.z) ** 2
                                         )
             else:
-                # АВТОВОЛЛ: скан по углам, адаптивный FOV
+                # АВТОВОЛЛ: скан по углам, выбор по пересечению луча со сферой головы
                 view_angles_vec = None
                 if o_view_angles:
                     view_angles_vec = safe_read_vec(process, client + o_view_angles)
@@ -464,18 +554,16 @@ def TriggerbotThreadFunction(Options, Offsets):
                 if view_angles_vec is None:
                     time.sleep(LOOP_SLEEP)
                     continue
-                view_angles = (view_angles_vec.y, view_angles_vec.x)
+                # view_angles_vec: x=pitch, y=yaw, z=roll
 
                 entity_list = safe_read_ptr(process, client + o_entity_list)
                 if not valid_ptr(entity_list):
                     time.sleep(LOOP_SLEEP)
                     continue
 
-                # Команда локального - ОДИН раз на скан, не на каждого кандидата
-                me_team = safe_read_int(process, local_pawn + o_team, 0) if team_check else 0
+                # Команда локального - ОДИН раз на скан
+                me_team = safe_read_int(process, local_pawn + o_team, 0) if o_team else 0
 
-                # Слоты 1..63 живут в бакете 0: list_entry один на весь скан,
-                # контроллеры - одним bulk-куском (фоллбек - поштучно).
                 entry0 = safe_read_ptr(process, entity_list + ENT_IDENTITY)
                 ctrl_buf = None
                 if valid_ptr(entry0):
@@ -487,11 +575,19 @@ def TriggerbotThreadFunction(Options, Offsets):
                     except Exception:
                         ctrl_buf = None
 
-                best_angle = 360.0
+                best_t = 10e12
                 best_target = 0
                 best_hp = 0
                 best_dist = 0.0
                 le2_cache = {}
+
+                # forward из view angles
+                pitch = math.radians(view_angles_vec.x)
+                yaw = math.radians(view_angles_vec.y)
+                cos_p = math.cos(pitch); sin_p = math.sin(pitch)
+                cos_y = math.cos(yaw); sin_y = math.sin(yaw)
+                fx, fy, fz = cos_p * cos_y, cos_p * sin_y, -sin_p
+                D = (fx, fy, fz)
 
                 for i in range(1, 64):
                     if ctrl_buf is not None:
@@ -529,7 +625,7 @@ def TriggerbotThreadFunction(Options, Offsets):
                     if hp <= 0 or hp > 100:
                         continue
 
-                    if team_check:
+                    if o_team and me_team != 0:
                         tgt_team = safe_read_int(process, pawn + o_team, 0)
                         if tgt_team not in (2, 3) or tgt_team == me_team:
                             continue
@@ -545,40 +641,87 @@ def TriggerbotThreadFunction(Options, Offsets):
                     head_pos = read_head_center(process, boneMatrix)
                     if head_pos is None:
                         continue
-
-                    angle_to_target = calculate_angle(eye_pos, head_pos)
-                    diff = angle_difference(view_angles, angle_to_target)
-
-                    dist = math.sqrt(
-                        (head_pos.x - eye_pos.x) ** 2 +
-                        (head_pos.y - eye_pos.y) ** 2 +
-                        (head_pos.z - eye_pos.z) ** 2
-                    )
-
-                    if not math.isfinite(dist) or not math.isfinite(diff):
+                    if not (math.isfinite(head_pos.x) and math.isfinite(head_pos.y) and math.isfinite(head_pos.z)):
                         continue
+                    def ray_sphere(Cx,Cy,Cz, r):
+                        OCx,OCy,OCz = Cx-eye_pos.x, Cy-eye_pos.y, Cz-eye_pos.z
+                        b = OCx*fx+OCy*fy+OCz*fz
+                        if b < 0.1: return None
+                        c = OCx*OCx+OCy*OCy+OCz*OCz - r*r
+                        d = b*b - c
+                        if d < 0: return None
+                        t = b - math.sqrt(d)
+                        if t < 0.1 or t > 8192: return None
+                        return t
+                    t = None
+                    if head_pos is not None:
+                        # try larger sphere to catch top/front
+                        for r,dz in ((4.6,1.4),(4.4,1.2),(4.2,1.0),(4.0,0.8),(3.8,0.6),(3.6,0)):
+                            t = ray_sphere(head_pos.x, head_pos.y, head_pos.z+dz, r)
+                            if t is not None: break
+                        if t is None:
+                            t = ray_sphere(head_pos.x+fx*0.25, head_pos.y+fy*0.25, head_pos.z+1.2, 4.2)
+                    else:
+                        t = None
+                    if t is None: continue
 
-                    if diff < best_angle:
-                        best_angle = diff
+                    dist = math.sqrt((head_pos.x-eye_pos.x)**2 + (head_pos.y-eye_pos.y)**2 + (head_pos.z-eye_pos.z)**2)
+                    if not math.isfinite(t) or not math.isfinite(dist): continue
+                    if t > dist + 5.0: continue  # sanity check
+
+                    if t < best_t:
+                        best_t = t
                         best_target = pawn
                         best_hp = hp
                         best_dist = dist
 
                 if valid_ptr(best_target) and best_hp > 0:
-                    threshold = max(0.05, lerp_by_distance(best_dist, wallbang_fov_points))
-                    if best_angle < threshold:
-                        target = best_target
-                        target_hp = best_hp
-                        target_dist = best_dist
+                    target = best_target
+                    target_hp = best_hp
+                    target_dist = best_dist
+                    target_pos = head_pos
 
                 time.sleep(WALLBANG_EXTRA_SLEEP)
 
-            if target and team_check:
+            if target and o_team:
                 tgt_team = safe_read_int(process, target + o_team, 0)
-                me_team = safe_read_int(process, local_pawn + o_team, 0)
-                if tgt_team not in (2, 3) or tgt_team == me_team:
+                me_team_local = safe_read_int(process, local_pawn + o_team, 0)
+                if tgt_team not in (2, 3) or (me_team_local != 0 and tgt_team == me_team_local):
                     target = None
                     target_hp = 0
+
+            if not valid_ptr(target) or target_hp <= 0:
+                time.sleep(LOOP_SLEEP)
+                continue
+
+            # Проверка видимости через дым (аналог ESP/аимбота).
+            # Запускается только когда включена галочка "Проверка на видимости"
+            # в субвкладке триггербота (ключ EnableTriggerbotVisibilityCheck).
+            # При включённом NoSmoke дым визуально убран - враг для игрока
+            # видим, поэтому в этом случае смок не учитываем.
+            if (to_bool(opts.get("EnableTriggerbotVisibilityCheck", False), False)
+                    and not to_bool(opts.get("EnableNoSmoke", False), False)
+                    and target_pos is not None
+                    and Runtime is not None):
+                try:
+                    smokes = getattr(Runtime, "smokes", None)
+                    if smokes:
+                        # local_eye = local_origin + view_offset
+                        view_offset = safe_read_vec(process, local_pawn + o_view_offset)
+                        if view_offset is not None:
+                            local_eye = Vector3(
+                                local_origin.x + view_offset.x,
+                                local_origin.y + view_offset.y,
+                                local_origin.z + view_offset.z
+                            )
+                            if calculations.smoke_blocks_segment(
+                                    local_eye, target_pos, smokes,
+                                    calculations.SMOKE_RADIUS,
+                                    now=time.time()):
+                                target = None
+                                target_hp = 0
+                except Exception:
+                    pass
 
             if not valid_ptr(target) or target_hp <= 0:
                 time.sleep(LOOP_SLEEP)
@@ -603,13 +746,16 @@ def TriggerbotThreadFunction(Options, Offsets):
                     time.sleep(LOOP_SLEEP)
                     continue
 
-            if shot_delay > 0.0 and (now - last_shot_time) < shot_delay:
+            if shot_ms > 0.0 and (now - last_shot_time) < (shot_ms / 1000.0):
                 time.sleep(0.01)
                 continue
 
             if not win32api.GetAsyncKeyState(0x01):
-                # Реакция (адаптивная по дистанции + рандом) живёт в gameinput
-                gameinput.LeftClick(target_dist)
+                # Реакция перед кликом: режим и числа задаёт GUI
+                # (TriggerbotDelay*, вкладка Triggerbot), сама формула -
+                # resolve_trigger_delay() в этом же файле (по дистанции).
+                delay_ms = resolve_trigger_delay(opts, target_dist)
+                gameinput.LeftClick(delay_ms=delay_ms)
                 last_shot_time = time.time()
 
             time.sleep(LOOP_SLEEP)

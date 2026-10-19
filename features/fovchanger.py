@@ -50,6 +50,12 @@ ZOOM_LOST_HARD_AFTER = 5.0
 
 FOV_RATE_EPS = 0.001
 
+# Пауза записей после смены игрового контекста (павн/контроллер). При входе
+# и выходе из матча (а также при респауне) мир CS2 пересоздаётся: объекты
+# освобождаются и аллоцируются заново. Пока контекст не устаканится, писать в
+# память опасно - см. гейт "живого контекста" в цикле ниже.
+CONTEXT_FREEZE_SEC = 0.5
+
 # Логирование fovchanger отключено в релизной версии
 
 # ==================== Структурные константы entity-листа ====================
@@ -183,6 +189,11 @@ def FovChangerThreadFunction(Options, Offsets):
     o_active_weapon = _schema("m_hActiveWeapon")
     o_zoom_level = _schema("m_zoomLevel")
 
+    # Признаки "живого" игрового контекста (гейт перед записями). Нет в дампе
+    # (0) - соответствующая часть гейта просто не проверяется.
+    o_health = _schema("m_iHealth")
+    o_pawn_alive = _schema("m_bPawnIsAlive")   # CCSPlayerController.m_bPawnIsAlive
+
     o_zoom_button = _button_off("zoom")
 
     # Разовая строка о деградации, если дамп неполный (в норме молчит)
@@ -208,7 +219,7 @@ def FovChangerThreadFunction(Options, Offsets):
             return lo
 
     # Локальный снимок настроек, 10 Гц. Единственный источник чтений
-    # в цикле (fov_enabled/noscope_enabled/desired_fov/FovDebug/NoScopeActive).
+    # в цикле (fov_enabled/noscope_enabled/desired_fov/NoScopeActive).
     opts_cache = dict(Options.items())
     opts_ts = time.time()
 
@@ -429,7 +440,11 @@ def FovChangerThreadFunction(Options, Offsets):
     prev_zoom_button_down = False
     zoom_enter_press_at = 0.0
 
-    next_debug_log = 0.0
+    # Гейт "живого контекста": последние увиденные павн/контроллер и время,
+    # до которого записи заморожены после их смены (защита вход/выход матча).
+    _prev_pawn = 0
+    _prev_ctrl = 0
+    _writes_frozen_until = 0.0
 
     while True:
         try:
@@ -591,10 +606,64 @@ def FovChangerThreadFunction(Options, Offsets):
             if in_scope and actual_zoom:
                 locked_scope_fov = current_fov
 
-            # Отладка по желанию: включи "FovDebug": True
-            if bool(opts_cache.get("FovDebug", False)) and now >= next_debug_log:
-                pass # debug disabled
-                next_debug_log = now + 1.0
+            # --- Гейт "живого игрового контекста" перед ЛЮБОЙ записью ниже ---
+            # При входе/выходе из матча мир CS2 пересоздаётся: павн,
+            # camera_services и контроллер освобождаются и создаются заново.
+            # Запись по устаревшему указателю бьёт в освобождённую (или уже
+            # чужую) память, портит кучу - игра падает при выходе из матча.
+            # Поэтому перед записью подтверждаем контекст:
+            #   1) dwLocalPlayerPawn/dwLocalPlayerController не изменились;
+            #   2) контроллер сообщает живого павна (m_bPawnIsAlive);
+            #   3) m_iHealth павна в осмысленном диапазоне.
+            # Плюс после смены павна/контроллера записи заморожены на
+            # CONTEXT_FREEZE_SEC - пока новый мир не устаканится.
+            try:
+                _pawn_now = memfuncs.ProcMemHandler.ReadPointer(process, client + o_local_pawn)
+            except Exception:
+                _pawn_now = 0
+            _ctrl_now = 0
+            if o_local_controller:
+                try:
+                    _ctrl_now = memfuncs.ProcMemHandler.ReadPointer(process, client + o_local_controller)
+                except Exception:
+                    _ctrl_now = 0
+
+            if _pawn_now != _prev_pawn or _ctrl_now != _prev_ctrl:
+                _prev_pawn = _pawn_now
+                _prev_ctrl = _ctrl_now
+                _writes_frozen_until = now + CONTEXT_FREEZE_SEC
+
+            _live = bool(_pawn_now) and _pawn_now == local_pawn and _ctrl_now == local_controller
+            if _live and o_health:
+                try:
+                    _hp = int(memfuncs.ProcMemHandler.ReadInt(process, _pawn_now + o_health))
+                except Exception:
+                    _hp = -1
+                _live = 0 < _hp <= 100
+            if _live and o_pawn_alive:
+                try:
+                    _live = bool(memfuncs.ProcMemHandler.ReadBytes(process, _ctrl_now + o_pawn_alive, 1)[0])
+                except Exception:
+                    _live = False
+
+            if (not _live) or now < _writes_frozen_until:
+                # Контекст не подтверждён (переход матча, освобождённый павн) -
+                # записи кадра пропускаем и сбрасываем состояние скоупа (как в
+                # ветке мёртвого павна выше). Та же идея, что _pawn_alive в
+                # antiflash, но с подтверждением живого контроллера.
+                in_scope = False
+                noscope_removed = False
+                locked_scope_fov = 0
+                zoom_lost_since = 0.0
+                last_scope_signal_time = 0.0
+                scope_is_sniper = False
+                prev_raw_scoped = False
+                raw_scoped_true_since = 0.0
+                prev_zoom_button_down = False
+                zoom_enter_press_at = 0.0
+                _set_noscope_active(False)
+                time.sleep(0.005)
+                continue
 
             if in_scope:
                 # Гейт: снятие - только когда noscope включен И в руках

@@ -1,5 +1,6 @@
 import pyMeow as pme
 import globals
+from features import spectator  # panel_pos: общая семантика позиций панелей
 from .colors import clamp, resolve_color
 from .fonts import draw_text as _draw_text
 
@@ -187,8 +188,9 @@ _KIT_DEFUSE_MAX = 7.0
 
 def draw_bomb_status_card(*, planted, time_left, total_time=40.0,
                           defusing=False, defuse_left=None, defuse_total=None,
-                          defuse_impossible=False):
+                          defuse_impossible=False, pos_x_pct=None, pos_y_pct=None):
     try:
+        screen_w = globals.SCREEN_WIDTH
         screen_h = globals.SCREEN_HEIGHT
         card_w = 236
         show_defuse = bool(planted and defusing and defuse_left is not None)
@@ -198,8 +200,11 @@ def draw_bomb_status_card(*, planted, time_left, total_time=40.0,
         title_size = 16
         status_size = 18
         detail_size = 13
-        x = 28
-        y = (screen_h - card_h) // 3
+        # Позиция: ползунки BombTimerPosX/Y (%, 0 = левый/верхний край,
+        # 100 = правый/нижний; окно ЦЕЛИКОМ). Дефолт - прежний жёсткий вид:
+        # x=28, y=(H-card_h)//3. Семантика общая с панелью активных функций.
+        x, y = spectator.panel_pos(screen_w, screen_h, card_w, card_h,
+                                   pos_x_pct, pos_y_pct, 28, (screen_h - card_h) // 3)
         # фиолетовая палитра GUI v5.x: акцент #965CFF, приглушённый #583896
         base_accent = _pcol("#965CFF")
         status_accent = _pcol("#ec4058") if planted else _pcol("#34d399")

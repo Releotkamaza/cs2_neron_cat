@@ -344,8 +344,18 @@ def _fresh_draw_data(processHandle, ent, o, want_bones):
 _last_focus_check = 0.0
 _last_focus_result = False
 
+# Заголовок окна настроек чита (тот же, что ищет static._gui_is_visible).
+_GUI_WINDOW_TITLE = "NERON"
+
 
 def _neron_has_focus():
+    """True, если фокус на CS2 ИЛИ на окне настроек чита (NERON).
+
+    v8.5: второе условие добавлено, чтобы панели оверлея были ЖИВЫМИ при
+    подстройке ползунков в GUI (окно оверлея topmost и клик-сквозное: оно
+    рисуется поверх окна настроек и не мешает тянуть ползунки). Любое
+    ДРУГОЕ приложение -> False, оверлей гасится пустым кадром (см.
+    clear_overlay) - следов прошлого кадра на экране не остаётся."""
     global _last_focus_check, _last_focus_result
     now = time.time()
     if now - _last_focus_check < 0.5:
@@ -356,6 +366,13 @@ def _neron_has_focus():
         if not hwnd:
             _last_focus_result = False
             return False
+        # Окно настроек чита? Сверяем заголовок (как static._gui_is_visible).
+        try:
+            if (win32gui.GetWindowText(hwnd) or "").strip() == _GUI_WINDOW_TITLE:
+                _last_focus_result = True
+                return True
+        except Exception:
+            pass
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         h = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid)
         try:
@@ -376,6 +393,23 @@ def _neron_has_focus():
         return False
 
 
+def clear_overlay():
+    """Погасить оверлей пустым ПРОЗРАЧНЫМ кадром.
+
+    Нужно везде, где рисовать нельзя (нет процесса игры; фокус не на CS2 и
+    не на настройках): окно оверлея topmost, и без предъявления нового
+    кадра на экране остаётся последний отрисованный (артефакт поверх чужих
+    окон). begin+end очищает буфер, как пустой кадр при выключенных фичах."""
+    try:
+        pme.begin_drawing()
+        pme.end_drawing()
+    except Exception:
+        try:
+            pme.end_drawing()
+        except Exception:
+            pass
+
+
 # ==================== Поток-ридер ====================
 # Сканер строит снапшот валидности (кто жив/враг/дистанция) + адреса
 # pawn/scene_node. Свежую геометрию перечитывает сам рендер-кадр
@@ -388,6 +422,10 @@ _reader_state = {
     "client": 0,
     "offsets": None,      # объект Offsets целиком (нужен .offset и visibility)
     "opts": {},
+    # Снапшот Runtime.smokes (координаты куполов дыма) для проверки
+    # видимости. Обновляет ESP_Update (Manager-IPC раз в кадр), читает
+    # поток сканера - без IPC в горячем цикле.
+    "smokes": (),
 }
 _snapshot = []
 _snap_lock = threading.Lock()
@@ -507,6 +545,10 @@ def _scan_once(st):
     opt_skeleton = bool(opts.get("EnableESPSkeletonRendering", False))
     opt_name = bool(opts.get("EnableESPNameText", False))
     opt_visible = bool(opts.get("ESP_VisibleCheckBox", False))
+    # Смок учитываем только когда он реально нарисован (NoSmoke выключен).
+    # При включённом NoSmoke дым убирается визуально - враг для игрока
+    # видим, и помечать его невидимым нельзя.
+    opt_smoke_occl = opt_visible and not bool(opts.get("EnableNoSmoke", False))
     opt_weapon = bool(opts.get("EnableESPWeaponText", False))
 
     render_required = bool(opts.get("EnableESP", True)) and any((
@@ -542,6 +584,19 @@ def _scan_once(st):
         return []
     if not entity_list:
         return []
+
+    # Глаз локального игрока (origin + m_vecViewOffset) - для проверки
+    # перекрытия смоком. Не прочиталось -> проверка смока просто не
+    # применяется (остаётся серверная маска засвета).
+    local_eye = None
+    if opt_visible:
+        try:
+            _lv = memfuncs.ProcMemHandler.ReadVec(proc, local_pawn + o.m_vecViewOffset)
+            local_eye = Vector3(local_origin.x + _lv.x,
+                                local_origin.y + _lv.y,
+                                local_origin.z + _lv.z)
+        except Exception:
+            local_eye = None
 
     # ---- Кластеры: одно bulk-чтение вместо чтения на каждое поле ----
     # Окно считается из реальных оффсетов датаclass-а, ноль хардкода.
@@ -595,7 +650,9 @@ def _scan_once(st):
 
     out = []
     _le2_cache = {}   # бакет -> list_entry павнов, кэш на проход
-    for i in range(64):
+    # Расширяем скан: до 128 (без фанатизма) + есть bulk 0-63
+    scan_max = min(128, 256)
+    for i in range(1, scan_max):
         try:
             # Контроллер: из bulk-массива прохода или поштучно (fallback)
             if ctrl_buf is not None:
@@ -702,6 +759,18 @@ def _scan_once(st):
                     visible = is_visible_to_local(proc, pawn, offsets_obj, local_index)
                 except Exception:
                     visible = False
+                # Смок перекрывает линию глаз->голова: серверная маска
+                # засвета дым учитывать не обязана - доводим сами.
+                if visible and local_eye is not None and opt_smoke_occl:
+                    smokes = st.get("smokes")
+                    if smokes:
+                        try:
+                            if calculations.smoke_blocks_segment(
+                                    local_eye, head, smokes, _ns_mod.SMOKE_RADIUS,
+                                    now=time.time()):
+                                visible = False
+                        except Exception:
+                            pass
 
             out.append(CachedEntity(
                 team=team,
@@ -737,7 +806,7 @@ def _reader_loop():
         if snap is not None:
             with _snap_lock:
                 _snapshot = snap
-        time.sleep(0.001)
+        time.sleep(0.002)  # rate-limit скана: меньше спама без потери отзывчивости
 
 
 def _ensure_reader():
@@ -751,13 +820,9 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     _ensure_reader()
 
     if not _neron_has_focus():
-        # Намеренный одиночный end_drawing без пары begin: продаёт бэкбуфер
-        # и качает PollInputEvents, пока окно без фокуса. Проверено
-        # рантаймом; не "чинить" на begin+end без прямой причины.
-        try:
-            pme.end_drawing()
-        except Exception:
-            pass
+        # Нет фокуса ни на CS2, ни на окне настроек чита -> пустой кадр
+        # (см. clear_overlay): оверлей гаснет, прошлый кадр не залипает.
+        clear_overlay()
         return
 
     # Обновляем состояние для ридера; смена процесса - сброс кэшей
@@ -771,6 +836,12 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
         _wpn_idx_cache.clear()
         _fresh_cache.clear()
     _reader_state["opts"] = Options
+    # Снапшот смоков один раз на кадр (Manager-IPC); поток сканера читает
+    # его без обращения к Manager.
+    try:
+        _reader_state["smokes"] = list(getattr(SharedRuntime, "smokes", None) or ())
+    except Exception:
+        _reader_state["smokes"] = ()
 
     opt_box = Options.get("EnableESPBoxRendering", False)
     opt_name = Options.get("EnableESPNameText", False)
@@ -805,6 +876,17 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     tracer_custom_col = _col(Options.get("Tracer_color", "#FFD24D"))
     hpbar_custom = bool(Options.get("EnableHPBarCustomColor", False))
     hpbar_custom_col = _col(Options.get("HPBar_color", "#FF6A5A"))
+
+    # NoScope-оверлей: общий цвет и толщина креста + круга-границы скопа
+    # (ТЗ 2026-10-08). "Свой цвет" выкл -> чёрный, как прежний хардкод.
+    noscope_custom = bool(Options.get("EnableNoScopeCustomColor", False))
+    noscope_col = _col(str(Options.get("NoScope_color", "#000000") or "#000000")) \
+        if noscope_custom else _col("#000000")
+    try:
+        noscope_thick = float(Options.get("NoScopeThickness", 1.0) or 1.0)
+    except Exception:
+        noscope_thick = 1.0
+    noscope_thick = max(1.0, min(5.0, noscope_thick))
 
     try:
         tracer_thick = float(Options.get("ESP_TracerThickness", 1.5) or 1.5)
@@ -842,63 +924,111 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         pass
 
-    # ===== NoScope-оверлей (крест при снятом скопе): ТОЛЬКО рисование =====
-    # Снятие скопа - целиком в fovchanger (там же гейт снайперок на снятие).
-    # zoomed: m_bIsScoped ИЛИ 0<FOV<89.
+    # ===== Панель активных функций (v8.4) =====
+    # Рисуется в том же статичном слое, что и зрители: мастер-хоткей
+    # ToggleKey_EnableActiveList в HotkeyEngine.poll переключает
+    # ActiveListVisible, здесь - только отрисовка по флагам
+    # EnableActiveList/ActiveListVisible.
     try:
-        if bool(Options.get("EnableNoScopeOverlay", False)):
-            off = Offsets.offset
-            o_sc = getattr(off, "m_bIsScoped", 0)
-            zoomed = False
-            lp = 0
-            try:
-                lp = memfuncs.ProcMemHandler.ReadPointer(
-                    processHandle, clientBaseAddress + off.dwLocalPlayerPawn)
-            except Exception:
-                lp = 0
-
-            if lp:
-                if o_sc:
-                    try:
-                        zoomed = memfuncs.ProcMemHandler.ReadInt(processHandle, lp + o_sc) == 1
-                    except Exception:
-                        zoomed = False
-
-                if not zoomed:
-                    try:
-                        cam = memfuncs.ProcMemHandler.ReadPointer(processHandle, lp + off.m_pCameraServices)
-                        if cam:
-                            cf = memfuncs.ProcMemHandler.ReadInt(processHandle, cam + off.m_iFOV)
-                            if 0 < cf < 89:
-                                zoomed = True
-                    except Exception:
-                        pass
-
-            # Гейт снайперок: крест - только с AWP/SSG08/SCAR-20/G3SG1 в
-            # руках. AUG/SG553 держат нативный скоуп - крест поверх него
-            # не нужен. Схема/список - единые источники (noscopedot), чтение
-            # - та же калиброванная композиция, что у Weapon Text. Сбой
-            # чтения -> крест off, нативный прицел остаётся чистым.
-            if zoomed:
-                try:
-                    _entlist = memfuncs.ProcMemHandler.ReadPointer(
-                        processHandle, clientBaseAddress + off.dwEntityList)
-                    _widx = None
-                    if _entlist:
-                        _widx = _read_active_weapon_idx(
-                            processHandle, _entlist, lp, off, noscopedot._get_schema())
-                    if _widx is None or _widx not in noscopedot.SNIPER_ITEM_IDS:
-                        zoomed = False
-                except Exception:
-                    zoomed = False
-
-            if zoomed:
-                sw2, sh2 = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
-                col = _col("#000000")
-                pme.draw_line(sw2 // 2, 0, sw2 // 2, sh2, color=col, thick=1.0)
-                pme.draw_line(0, sh2 // 2, sw2, sh2 // 2, color=col, thick=1.0)
+        static_layer.render_active_list(pme, Options)
     except Exception:
         pass
+
+    # ===== NoScope-оверлей (крест) + кастомный прицел -> ВЕРХНИЙ слой =====
+    # Хелпер определяется здесь, а вызывается ПОСЛЕ цикла по целям (см. ниже)
+    # и в ветке view_matrix=None: pme.draw_* - immediate mode, рисует тот, кто
+    # вызвал позже. Раньше оба вызывались ДО цикла -> ESP (бокс/скелет/надписи)
+    # перекрывала центр экрана крестом/прицелом.
+    def _draw_center_top():
+        """Крест NoScope-оверлея + кастомный прицел поверх ESP.
+        Вызывается после цикла по целям и бомб-карты, а в ветке
+        view_matrix=None - вместо них: цикла нет, но крест/прицел
+        обязаны появиться в кадре.
+        Снятие скопа - целиком в fovchanger (там же гейт снайперок на снятие).
+        zoomed: m_bIsScoped ИЛИ 0<FOV<89."""
+        # ===== NoScope-оверлей (крест при снятом скопе): ТОЛЬКО рисование =====
+        try:
+            if bool(Options.get("EnableNoScopeOverlay", False)):
+                off = Offsets.offset
+                o_sc = getattr(off, "m_bIsScoped", 0)
+                zoomed = False
+                lp = 0
+                try:
+                    lp = memfuncs.ProcMemHandler.ReadPointer(
+                        processHandle, clientBaseAddress + off.dwLocalPlayerPawn)
+                except Exception:
+                    lp = 0
+
+                if lp:
+                    if o_sc:
+                        try:
+                            zoomed = memfuncs.ProcMemHandler.ReadInt(processHandle, lp + o_sc) == 1
+                        except Exception:
+                            zoomed = False
+
+                    if not zoomed:
+                        try:
+                            cam = memfuncs.ProcMemHandler.ReadPointer(processHandle, lp + off.m_pCameraServices)
+                            if cam:
+                                cf = memfuncs.ProcMemHandler.ReadInt(processHandle, cam + off.m_iFOV)
+                                if 0 < cf < 89:
+                                    zoomed = True
+                        except Exception:
+                            pass
+
+                # Гейт снайперок: крест - только с AWP/SSG08/SCAR-20/G3SG1 в
+                # руках. AUG/SG553 держат нативный скоуп - крест поверх него
+                # не нужен. Схема/список - единые источники (noscopedot), чтение
+                # - та же калиброванная композиция, что у Weapon Text. Сбой
+                # чтения -> крест off, нативный прицел остаётся чистым.
+                if zoomed:
+                    try:
+                        _entlist = memfuncs.ProcMemHandler.ReadPointer(
+                            processHandle, clientBaseAddress + off.dwEntityList)
+                        _widx = None
+                        if _entlist:
+                            _widx = _read_active_weapon_idx(
+                                processHandle, _entlist, lp, off, noscopedot._get_schema())
+                        if _widx is None or _widx not in noscopedot.SNIPER_ITEM_IDS:
+                            zoomed = False
+                    except Exception:
+                        zoomed = False
+
+                if zoomed:
+                    sw2, sh2 = globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT
+                    # Цвет и толщина - общие для креста и круга (ТЗ 2026-10-08):
+                    # читаются на внешнем уровне ESP_Update (см. noscope_col).
+                    col = noscope_col
+                    thick = noscope_thick
+                    pme.draw_line(sw2 // 2, 0, sw2 // 2, sh2, color=col, thick=thick)
+                    pme.draw_line(0, sh2 // 2, sw2, sh2 // 2, color=col, thick=thick)
+                    # Круг - граница чёрного поля нативного скопа (как если бы
+                    # скоп не отключался). Замер скриншота юзера (1920x1080,
+                    # 2026-10-08): окно скопа - КРУГ, r = 432px = 0.4 * высота
+                    # экрана, центр = центр экрана (медианы по четвертям
+                    # 430-439, симметрия подтверждена). На других разрешениях
+                    # масштаб по высоте; если не совпадёт - скажет, добавим
+                    # слайдер радиуса. Замкнутая ломаная из draw_line, как
+                    # маркер смока в nosmoke: у raylib circle_lines нет thick.
+                    _r = sh2 * 0.4
+                    _cxx, _cyy = sw2 // 2, sh2 // 2
+                    _n = 64
+                    _px = [_cxx + _r * _m.cos(2.0 * _m.pi * i / _n) for i in range(_n)]
+                    _py = [_cyy + _r * _m.sin(2.0 * _m.pi * i / _n) for i in range(_n)]
+                    for _i in range(_n):
+                        _j = (_i + 1) % _n
+                        pme.draw_line(int(_px[_i]), int(_py[_i]),
+                                      int(_px[_j]), int(_py[_j]),
+                                      color=col, thick=thick)
+        except Exception:
+            pass
+
+        # Кастомный прицел - центр поверх ESP (см. docstring). Оба центровые,
+        # состояния почти взаимоисключающие: прицел молчит в живом зуме.
+        try:
+            static_layer.render_crosshair(pme, processHandle, clientBaseAddress, Offsets, Options)
+        except Exception:
+            pass
 
     # Точка ноускопа: статичный слой (features/esp/static.py): параметры
     # (цвет/радиус/прозрачность) кэшируются, только наличие по таймеру.
@@ -907,21 +1037,34 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
     except Exception:
         pass
 
-    # v5.9: кастомный прицел - статичный слой (features/esp/static.py):
-    # геометрия кэшируется и читается только при открытом окне чита.
-    # Живые гейты (зум/алив) draw_cfg проверяет каждый кадр сам.
-    try:
-        static_layer.render_crosshair(pme, processHandle, clientBaseAddress, Offsets, Options)
-    except Exception:
-        pass
+    # NB: крест NoScope-оверлея и кастомный прицел рисуются хелпером
+    # _draw_center_top() ПОСЛЕ цикла по целям (и бомб-карты), т.к. pme.draw_* -
+    # immediate mode: последний вызов перекрывает предыдущий. Ранний вызов
+    # (этот блок до правки) означал, что ESP перекрывает центр экрана.
 
     try:
         view_matrix = memfuncs.ProcMemHandler.ReadMatrix(
             processHandle, clientBaseAddress + Offsets.offset.dwViewMatrix)
+        # Доп. валидация матрицы
+        if view_matrix and getattr(view_matrix, "matrix", None):
+            bad = False
+            mat = view_matrix.matrix
+            for r in mat:
+                for v in r:
+                    if not _m.isfinite(v):
+                        bad = True
+                        break
+                if bad:
+                    break
+            if bad:
+                view_matrix = None
     except Exception:
         view_matrix = None
 
     if view_matrix is None:
+        # Цикла по целям не будет - центр-оверлеи рисуем здесь (см. NB выше),
+        # иначе в этом кадре крест/прицел не появились бы вовсе.
+        _draw_center_top()
         try:
             pme.end_drawing()
         except Exception:
@@ -1076,9 +1219,16 @@ def ESP_Update(processHandle, clientBaseAddress, Options, Offsets, SharedBombSta
                 defuse_left=getattr(SharedBombState, "bombDefuseLeft", None),
                 defuse_total=getattr(SharedBombState, "bombDefuseTotal", None),
                 defuse_impossible=bool(getattr(SharedBombState, "bombDefuseImpossible", False)),
+                pos_x_pct=Options.get("BombTimerPosX", 2),
+                pos_y_pct=Options.get("BombTimerPosY", 33),
             )
     except Exception:
         pass
+
+    # Центр-оверлеи (крест NoScope + кастомный прицел) - ПОСЛЕДНИМИ:
+    # поверх ESP (боксы/скелет/надписи), маркеров смоков и бомб-карты.
+    # См. docstring _draw_center_top и NB у чтения view_matrix.
+    _draw_center_top()
 
     try:
         pme.end_drawing()

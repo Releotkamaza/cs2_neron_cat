@@ -15,10 +15,12 @@ from features import triggerbot
 from features import bhop
 from features import spectator
 from features import nosmoke
+from features import glow
 from GUI import gui_mainloop
 from GUI import gui_util
 from types import SimpleNamespace
 import multiprocessing
+import atexit
 import time
 import win32api
 import keyboard, os, json
@@ -118,6 +120,36 @@ def LoadConfig():
         # в общий движок. Новые бинды её перезаписывают, ключ-источник мёртв.
         if not merged.get("ToggleKey_EnableESP", 0) and merged.get("ESPMasterKey", 0):
             merged["ToggleKey_EnableESP"] = merged["ESPMasterKey"]
+        # Миграция мультипозиционных тумблеров (v7): старые bool-галочки ->
+        # строковый режим. Присутствие ключа проверяем в loaded, а не в
+        # merged (иначе дефолт из CHEAT_SETTINGS маскирует старый конфиг).
+        if "NoScopeCrosshairMode" not in loaded:
+            if loaded.get("EnableNoScopeDot"):
+                merged["NoScopeCrosshairMode"] = "Точка"
+            elif loaded.get("EnableNoScopeDotSeparate"):
+                merged["NoScopeCrosshairMode"] = "Кастомный"
+        if "TriggerbotMode" not in loaded:
+            if loaded.get("EnableTriggerbot", globals.CHEAT_SETTINGS.get("EnableTriggerbot", True)):
+                merged["TriggerbotMode"] = ("Releotkamaza" if loaded.get("TriggerbotWallbang")
+                                            else "SadraKhorami")
+            else:
+                merged["TriggerbotMode"] = "Выкл"
+        # Хоткей-клавиши тогглов переносятся на новые ключи режимов.
+        if not merged.get("ToggleKey_TriggerbotMode") and merged.get("ToggleKey_EnableTriggerbot"):
+            merged["ToggleKey_TriggerbotMode"] = merged["ToggleKey_EnableTriggerbot"]
+        if not merged.get("ToggleKey_NoScopeCrosshairMode") and merged.get("ToggleKey_EnableNoScopeDot"):
+            merged["ToggleKey_NoScopeCrosshairMode"] = merged["ToggleKey_EnableNoScopeDot"]
+        # v8.4.3: мастер-ключ панели "Активные функции" переименован
+        # (ActiveListKey -> ToggleKey_EnableActiveList, бинд в hover-попапе).
+        if not merged.get("ToggleKey_EnableActiveList") and merged.get("ActiveListKey"):
+            merged["ToggleKey_EnableActiveList"] = merged["ActiveListKey"]
+        # Производные bool-ключи: держим согласованными с режимами.
+        _nsm = merged.get("NoScopeCrosshairMode", "Выкл")
+        merged["EnableNoScopeDot"] = (_nsm == "Точка")
+        merged["EnableNoScopeDotSeparate"] = _nsm in ("Кастомный", "Точка")
+        _tbm = merged.get("TriggerbotMode", "SadraKhorami")
+        merged["EnableTriggerbot"] = _tbm != "Выкл"
+        merged["TriggerbotWallbang"] = _tbm == "Releotkamaza"
         globals.CHEAT_SETTINGS = merged
 
 
@@ -144,7 +176,7 @@ if __name__ == "__main__":
           "###    #### ########## ###    ###  ########  ###    #### ########## ########  ###     ### ###           \n "
 
           "\n  "
-          "             - NERON v0.9.1\n  "
+          "             - NERON v0.10.8\n  "
           "             - https://github.com/Releotkamaza/cs2_neron_cat\n  "
           f"             - {random.choice(kaomojis)}  ")
 
@@ -152,10 +184,6 @@ if __name__ == "__main__":
     # и давал фреймтайм-спайки в игре. Если нужен - верни вызов.
 
     multiprocessing.freeze_support()
-
-    # Ардуино-ветка оригинала удалена: use_arduino жёстко "N", ветка была
-    # недостижима, serial-импорты тянули pyserial впустую.
-    ARDUINO_HANDLE = None
 
     # Дефолты клавиш тогглов из реестра - ДО LoadConfig, чтобы merge
     # видел их и свежий settings.json содержал все ключи.
@@ -167,29 +195,95 @@ if __name__ == "__main__":
     ProcessObject = connector.ensure_process()
     ClientModuleAddress = connector.ensure_module("client.dll")
 
-    def _clean_exit():
-        FlushPendingSave()
-        # Возвращаем FOV по умолчанию, чтобы после выхода игра не оставалась "с нашим FOV"
+    def _restore_game_state():
+        """Вернуть игре её значения: наш FOV -> 90, яркость вспышки -> 255.
+
+        Вызывать ТОЛЬКО после остановки воркеров: fovchanger и antiflash
+        крутятся в отдельных процессах и иначе снова перезапишут поля."""
         try:
             off = globals.GAME_OFFSETS.offset
             p = connector.ensure_process()
             c = connector.ensure_module("client.dll")
-            if p and c:
-                lp = memfuncs.ProcMemHandler.ReadPointer(p, c + off.dwLocalPlayerPawn)
-                if lp:
-                    cam = memfuncs.ProcMemHandler.ReadPointer(p, lp + off.m_pCameraServices)
-                    if cam:
-                        memfuncs.ProcMemHandler.WriteInt(p, cam + off.m_iFOV, 90)
+            if not (p and c):
+                return
+            lp = memfuncs.ProcMemHandler.ReadPointer(p, c + off.dwLocalPlayerPawn)
+            if not lp:
+                return
+            try:
+                cam = memfuncs.ProcMemHandler.ReadPointer(p, lp + off.m_pCameraServices)
+                if cam:
+                    memfuncs.ProcMemHandler.WriteInt(p, cam + off.m_iFOV, 90)
+            except Exception:
+                pass
+            try:
+                ctrl = memfuncs.ProcMemHandler.ReadPointer(p, c + off.dwLocalPlayerController)
+                if ctrl:
+                    memfuncs.ProcMemHandler.WriteInt(p, ctrl + off.m_iDesiredFOV, 90)
+            except Exception:
+                pass
+            try:
+                memfuncs.ProcMemHandler.WriteFloat(p, lp + off.m_flFlashMaxAlpha, 255.0)
+            except Exception:
+                pass
         except Exception:
             pass
+
+    def _shutdown():
+        """Остановить воркеры, вернуть память игры, сохранить конфиг.
+
+        Порядок важен: сначала гасим воркеры (иначе они снова запишут FOV/
+        вспышку), затем восстанавливаем поля, затем сохраняем и гасим
+        Manager. Без этой очистки os._exit оставлял процессы-сироты, а игра
+        оставалась с нашим FOV и выключенной вспышкой."""
+        try:
+            mgr_proc = getattr(Manager, "_process", None)
+        except Exception:
+            mgr_proc = None
+        try:
+            for _p in multiprocessing.active_children():
+                if _p is mgr_proc:
+                    continue
+                try:
+                    _p.terminate()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _restore_game_state()
+        try:
+            FlushPendingSave()
+            _do_save(dict(SharedOptions))
+        except Exception:
+            pass
+        try:
+            Manager.shutdown()
+        except Exception:
+            pass
+
+    def _clean_exit():
+        _shutdown()
         os._exit(0)
 
     keyboard.add_hotkey("end", callback=_clean_exit)
+    # Нормальный выход (закрытие окна оверлея, Ctrl+C, исключение) тоже
+    # обязан вернуть FOV/вспышку и сохранить конфиг. os._exit эту регистрацию
+    # не запускает, поэтому _clean_exit зовёт _shutdown() сам.
+    atexit.register(_shutdown)
 
     # Config
     LoadConfig()
     Manager = multiprocessing.Manager()
     SharedOptions_M = Manager.dict(globals.CHEAT_SETTINGS)
+    # Панель «Активные функции»: включённая галочка = видимая панель при старте.
+    # Колбэк галочки при старте не вызывается, поэтому застрявший
+    # ActiveListVisible=False (спрятано мастер-хоткеем - у юзера это Ctrl,
+    # а Ctrl в CS2 = присед!) выглядел как «список перестал работать».
+    # Пишем в память (Manager.dict), settings.json не трогаем.
+    try:
+        if bool(SharedOptions_M.get("EnableActiveList", False)):
+            SharedOptions_M["ActiveListVisible"] = True
+    except Exception:
+        pass
     SharedOptions = ManagedConfig(SharedOptions_M, save_function=SaveConfig)
 
     # Служебные флаги процессов (не конфиг, в settings.json не пишется):
@@ -252,7 +346,7 @@ if __name__ == "__main__":
     AutoAccept_proc.start()
 
     # Triggerbot (separate worker)
-    Trigger_proc = multiprocessing.Process(target=triggerbot.TriggerbotThreadFunction, args=(SharedOptions, SharedOffsets,))
+    Trigger_proc = multiprocessing.Process(target=triggerbot.TriggerbotThreadFunction, args=(SharedOptions, SharedOffsets, SharedRuntime,))
     Trigger_proc.daemon = True
     Trigger_proc.start()
 
@@ -282,6 +376,15 @@ if __name__ == "__main__":
     NoSmoke_proc.start()
     logutil.debug("[main] nosmoke worker: started")
 
+    # Glow worker
+    Glow_proc = multiprocessing.Process(
+        target=glow.GlowThreadFunction,
+        args=(SharedOptions, SharedOffsets)
+    )
+    Glow_proc.daemon = True
+    Glow_proc.start()
+    logutil.debug("[main] glow worker: started")
+
     # Spectator monitor
     Spectator_proc = multiprocessing.Process(
         target=spectator.SpectatorThreadFunction,
@@ -295,6 +398,7 @@ if __name__ == "__main__":
     _gc_counter = 0
     _gc_last_time = time.time()
     _opts_ts = 0.0
+    _esp_err_ts = 0.0
     local_opts = dict(SharedOptions.items())
 
     while esp.pme.overlay_loop():
@@ -328,6 +432,13 @@ if __name__ == "__main__":
             ClientModuleAddress = connector.ensure_module("client.dll")
         except Exception:
             connector.invalidate()
+            # Игра закрыта/перезапускается -> рисовать нечем. Гасим оверлей
+            # пустым кадром, иначе topmost-окно держит последний кадр на
+            # экране (артефакт поверх чужих окон, v8.5).
+            try:
+                esp.clear_overlay()
+            except Exception:
+                pass
             time.sleep(0.5)
             continue
 
@@ -340,9 +451,15 @@ if __name__ == "__main__":
             esp.ESP_Update(ProcessObject, ClientModuleAddress, local_opts, SharedOffsets, SharedBombState, SharedRuntime)
             aimbot_key = int(local_opts.get("AimbotKey", 6) or 0)
             if local_opts.get("EnableAimbot", False) and aimbot_key > 0 and win32api.GetAsyncKeyState(aimbot_key) & 0x8000:
-                aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, local_opts, ARDUINO_HANDLE=ARDUINO_HANDLE)
-            rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, local_opts, ARDUINO_HANDLE=ARDUINO_HANDLE)
+                aimbot.Aimbot_Update(ProcessObject, ClientModuleAddress, SharedOffsets, local_opts, SharedRuntime)
+            rcs.RecoilControl_Update(ProcessObject, ClientModuleAddress, SharedOffsets, local_opts)
         except Exception as _e:
-            print("[MAIN] ESP/Aimbot error:", repr(_e))
+            # Не спамим в консоль на каждый кадр: устойчивая ошибка ESP иначе
+            # забьёт вывод сотнями строк в секунду. Строка - не чаще 1 раза в
+            # 2 с, полные детали - в debug (NERON_DEBUG=1).
+            if _gc_now - _esp_err_ts >= 2.0:
+                _esp_err_ts = _gc_now
+                print("[MAIN] ESP/Aimbot error:", repr(_e), flush=True)
+            logutil.debug(f"[MAIN] ESP/Aimbot error: {_e!r}")
             connector.invalidate()
             continue

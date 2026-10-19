@@ -40,11 +40,52 @@ CHEAT_SETTINGS = {
     "EnableRecoilControl": False,
     "RecoilControlSmoothing": 1.0,
 
+    # Triggerbot: мультипозиционный режим (features/triggerbot.py читает
+    # TriggerbotMode). EnableTriggerbot/TriggerbotWallbang - производные,
+    # синхронизируются GUI ради старых конфигов и legacy-кода.
+    "TriggerbotMode": "SadraKhorami",   # "Выкл" | "SadraKhorami" | "Releotkamaza"
     "EnableTriggerbot": True,
     "TriggerbotSpeedThreshold": 5.0,
     "TriggerbotRequireGround": True,
     "TriggerbotWallbang": False,
-    "EnableTriggerbotTeamCheck": False,
+    "EnableTriggerbotTeamCheck": True,
+    # Проверка видимости для триггербота (учитывает дым).
+    # По умолчанию выкл — чтобы не ломать стрельбу до первой настройки.
+    "EnableTriggerbotVisibilityCheck": False,
+
+    # Triggerbot: задержка (реакция) перед выстрелом. Читает
+    # features/triggerbot.py -> resolve_trigger_delay() (в том же файле).
+    # TriggerbotDelayMode:
+    #   "static"   - фиксированная TriggerbotDelayStatic, мс (ползунок 0..500);
+    #   "range"    - случайная в [TriggerbotDelayMin, TriggerbotDelayMax], мс;
+    #   "distance" - по таблице TriggerbotDelayTable: строка
+    #                [дист_от, дист_до, задержка_от_мс, задержка_до_мс];
+    #                задержка выбирается случайно внутри строки. Дефолт
+    #                повторяет прежнюю жёсткую кривую gameinput
+    #                (TRIGGER_DELAY_STEPS), поведение триггера не меняется.
+    "TriggerbotDelayMode": "distance",   # "static" | "range" | "distance"
+    "TriggerbotDelayStatic": 50.0,       # мс, 0..500
+    "TriggerbotDelayMin": 10.0,          # мс, 0..500
+    "TriggerbotDelayMax": 30.0,          # мс, 0..500
+    "TriggerbotDelayTable": [
+        [0.0, 250.0, 20.0, 30.0],
+        [250.0, 500.0, 15.0, 25.0],
+        [500.0, 800.0, 10.0, 20.0],
+        [800.0, 1200.0, 6.0, 10.0],
+        [1200.0, 2000.0, 4.0, 8.0],
+        [2000.0, 100000.0, 2.0, 6.0],
+    ],
+    # Минимальный интервал между выстрелами (мс), ползунок 0..5000.
+    "TriggerbotShotDelayMs": 400.0,
+
+    # Glow (обводка персонажей, так называемый glow)
+    "EnableGlow": False,
+    "ToggleKey_EnableGlow": 0,
+    "GlowMode": "Team",  # "Team" | "Health" | "Custom"
+    "GlowShowEnemies": True,
+    "GlowShowAllies": True,
+    "GlowEnemyColor": "#FF5555",
+    "GlowAllyColor": "#55AAFF",
 
     "EnableESP": True,
     "EnableESPTeamCheck": False,
@@ -87,7 +128,11 @@ CHEAT_SETTINGS = {
 
     # Кастомный прицел (features/customcrosshair.py, вкладка "Прицел")
     "EnableCustomCrosshair": False,
-    "EnableNoScopeDotSeparate": False,  # точка для снайперок, кастомный - для остального
+    # Мультипозиционный ноускоп-прицел: "Выкл" | "Кастомный" | "Точка".
+    # Заменяет пару bool-галочек. EnableNoScopeDot/EnableNoScopeDotSeparate
+    # остаются производными (синхронизирует GUI) ради старых конфигов.
+    "NoScopeCrosshairMode": "Выкл",
+    "EnableNoScopeDotSeparate": False,  # производный: mode in ("Кастомный", "Точка")
     "Crosshair_Style": "Обычный",       # "Обычный" | "T-образный"
     "Crosshair_color": "#00FF00",
     "Crosshair_Opacity": 100,           # % (10-100)
@@ -112,6 +157,9 @@ CHEAT_SETTINGS = {
 
     "EnableNoScopeOverlay": False,
     "NoScopeActive": False,            # служебный флаг fovchanger, не настройка
+    "EnableNoScopeCustomColor": False, # свой цвет креста+круга скопа (вкл -> чёрный)
+    "NoScope_color": "#000000",        # общий цвет креста и круга-границы скопа
+    "NoScopeThickness": 1.0,           # общая толщина линий креста и круга (1.0-5.0)
 
     "ESP_HealthSyncSkeleton": True,
     "ESP_HealthSyncBar": True,
@@ -120,6 +168,34 @@ CHEAT_SETTINGS = {
     "ESP_HealthBarThicknessScale": 1.0,
 
     "ESP_VisibleCheckBox": False,
+
+    # Панель "Активные функции" (вкладка GUI, оверлей features/active_list.py)
+    "EnableActiveList": True,         # мастер-галочка: панель работает/выключена
+    "ToggleKey_EnableActiveList": 0,  # мастер-ключ показа/скрытия (0 = выкл)
+    "ActiveListPosX": 70,         # позиция окна X, % ширины экрана
+    "ActiveListPosY": 4,          # позиция окна Y, % высоты экрана
+    "ActiveListVisible": False,   # видимость окна (переключает мастер-ключ)
+    "ListShow_EnableESP": True,
+    "ListShow_TriggerbotMode": True,
+    "ListShow_EnableAimbot": True,
+    "ListShow_EnableRecoilControl": True,
+    "ListShow_EnableBhop": True,
+    "ListShow_EnableAntiFlashbang": True,
+    "ListShow_EnableAutoAccept": True,
+    "ListShow_EnableFovChanger": True,
+    "ListShow_EnableNoSmoke": True,
+    "ListShow_EnableNoScopeOverlay": True,
+    "ListShow_NoScopeCrosshairMode": True,
+    "ListShow_EnableESPBombTimer": True,
+    "ListShow_EnableShowSpectators": True,
+
+    # Позиции панелей оверлея (вкладка GUI «Прочее»), та же семантика, что у
+    # ActiveListPosX/Y: X/Y в % — окно ЦЕЛИКОМ (0 = левый/верхний край,
+    # 100 = правый/нижний). Дефолты повторяют прежние жёсткие позиции.
+    "BombTimerPosX": 2,           # было x=28 при 1920 (карточка 236)
+    "BombTimerPosY": 33,          # было y=(H-card_h)/3
+    "SpectatorPosX": 98,          # было x=W-block_w-24 (правый край)
+    "SpectatorPosY": 50,          # было по центру по вертикали
 }
 
 # Мост "аимбот контролирует отдачу" - читается rcs.py на каждом такте.

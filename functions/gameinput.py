@@ -6,61 +6,34 @@ from ext.datatypes import *
 from globals import *
 
 # ============================================================================
-# НАСТРОЙКИ СКОРОСТИ ТРИГГЕРА (РЕДАКТИРУЙ ЗДЕСЬ)
+# МОДУЛЬ ИМПУТОВ (только ввод в игру)
 # ============================================================================
-# Таблица реакции по ПРОМЕЖУТКАМ дистанции.
-# Формат строки: (от_дист, до_дист, мин_задержка_мс, макс_задержка_мс)
-#   - дистанция в юнитах (1 метр ~ 39 юнитов);
-#   - задержка в миллисекундах ПЕРЕД нажатием (1 сек = 1000 мс).
-# Берётся строка, в которую попала дистанция, и задержка выбирается
-# СЛУЧАЙНО между мин и макс. Дальше цель -> меньше мс (быстрее).
-TRIGGER_DELAY_STEPS = [
-    (0.0,     250.0,   20.0, 30.0),   # вплотную: медленно, по-человечески
-    (250.0,   500.0,   15.0,  25.0),   # ближняя
-    (500.0,   800.0,   10.0,  20.0),   # средняя
-    (800.0,  1200.0,   6.0,  10.0),   # дальняя
-    (1200.0, 2000.0,   4.0,  8.0),   # очень дальняя
-    (2000.0, 99999.0,   2.0,  6.0),   # экстремально далеко
-]
+# Здесь только низкоуровневые вводы: ЛКМ и перемещение курсора.
+# Политики задержек тут нет: задержку реакции триггера считает
+# features/triggerbot.py по настройкам TriggerbotDelay* и отдаёт в
+# LeftClick готовое число. Так скрытая константа не может незаметно
+# подменить настройку пользователя.
 
-# Задержка, если дистанция неизвестна (LeftClick() без аргумента).
-LEGACY_DELAY_MIN_MS = 1.0
-LEGACY_DELAY_MAX_MS = 17.0
-
-# Время удержания кнопки (нажатие->отпускание), мс, случайно.
+# Время удержания ЛКМ (нажатие -> отпускание), мс, случайно.
 CLICK_HOLD_MIN_MS = 8.0
 CLICK_HOLD_MAX_MS = 30.0
 
 
-def _pick_delay_ms(distance):
-    """Случайная задержка в мс внутри своего промежутка дистанции."""
-    if distance is None:
-        return random.uniform(LEGACY_DELAY_MIN_MS, LEGACY_DELAY_MAX_MS)
-    d = max(0.0, float(distance))
-    for (d0, d1, ms_min, ms_max) in TRIGGER_DELAY_STEPS:
-        if d0 <= d < d1:
-            return random.uniform(ms_min, ms_max)
-    return random.uniform(TRIGGER_DELAY_STEPS[-1][2], TRIGGER_DELAY_STEPS[-1][3])
+def LeftClick(delay_ms=0.0):
+    """Клик ЛКМ: пауза delay_ms -> LEFTDOWN -> удержание -> LEFTUP.
 
-
-def LeftClick(distance=None):
+    delay_ms - ГОТОВОЕ время в мс (снимает features/triggerbot.py по
+    конфигу). None/мусор -> клик без паузы.
     """
-    Эмуляция клика ЛКМ.
-    distance - дистанция до цели в юнитах (передаёт триггер).
-    distance=None - старое поведение для прочих модулей.
-    """
-    time.sleep(_pick_delay_ms(distance) / 1000.0)          # реакция
+    try:
+        pause_ms = float(delay_ms)
+    except (TypeError, ValueError):
+        pause_ms = 0.0
+    if pause_ms > 0.0:
+        time.sleep(pause_ms / 1000.0)
     ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)   # LEFTDOWN
     time.sleep(random.uniform(CLICK_HOLD_MIN_MS, CLICK_HOLD_MAX_MS) / 1000.0)
     ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)   # LEFTUP
-
-
-def LeftClickArduino(handle):
-    """Клик через Arduino (внешний эмулятор)."""
-    time.sleep(random.randint(10, 30) / 1000.0)
-    handle.write(f"down\n".encode())
-    time.sleep(random.randint(10, 50) / 1000.0)
-    handle.write(f"up\n".encode())
 
 
 def moveMouseToLocation(pos: Vector2):
@@ -79,13 +52,3 @@ def getCurrentMousePosition():
     if pos:
         return Vector2(pos[0], pos[1])
     return Vector2(0, 0)
-
-
-def moveMouseToLocationArdunio(pos: Vector2, handle=None):
-    """То же, что moveMouseToLocation, но через Arduino."""
-    if pos.x < 0.0 and pos.y < 0.0:
-        return
-    center_of_screen = Vector2(SCREEN_WIDTH / 2.0, SCREEN_HEIGHT / 2.0)
-    dx = int(pos.x - center_of_screen.x)
-    dy = int(pos.y - center_of_screen.y)
-    handle.write(f"move {dx},{dy}\n".encode())

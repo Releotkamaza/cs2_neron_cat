@@ -22,6 +22,7 @@ import win32gui
 
 import globals
 from features import spectator
+from features import active_list
 from features import customcrosshair
 from features import noscopedot
 from .fonts import _find_overlay_font, _ensure_raylib_font, _get_overlay_font_handle
@@ -36,12 +37,14 @@ GUI_VISIBLE_CHECK_SEC = 0.25  # кэш проверки видимости ок�
 _spec_cache = []
 _spec_last_read = 0.0
 _spec_enabled = True
+_spec_pos_x = 98   # X в % (0=левый край, 100=правый), ключ SpectatorPosX
+_spec_pos_y = 50   # Y в % (0=верх, 100=низ), ключ SpectatorPosY
 
 
 def render_spectators(pme, Options, SharedRuntime=None):
     """Панель зрителей. Список и флаг читаются раз в SPEC_UPDATE_SEC,
     дальше рисуем по кэшу. Шапка/тексты панели - render_spectator_block."""
-    global _spec_cache, _spec_last_read, _spec_enabled
+    global _spec_cache, _spec_last_read, _spec_enabled, _spec_pos_x, _spec_pos_y
     now = time.time()
     if now - _spec_last_read >= SPEC_UPDATE_SEC:
         _spec_last_read = now
@@ -49,6 +52,16 @@ def render_spectators(pme, Options, SharedRuntime=None):
             _spec_enabled = bool(Options.get("EnableShowSpectators", True))
         except Exception:
             _spec_enabled = True
+        # Позиция панели (ползунки вкладки «Прочее»): X/Y в % от свободного
+        # места, 0 = левый/верхний край, 100 = правый/нижний.
+        try:
+            _spec_pos_x = Options.get("SpectatorPosX", 98)
+        except Exception:
+            _spec_pos_x = 98
+        try:
+            _spec_pos_y = Options.get("SpectatorPosY", 50)
+        except Exception:
+            _spec_pos_y = 50
         try:
             _spec_cache = list(SharedRuntime.spectators) if SharedRuntime is not None else []
         except Exception:
@@ -59,6 +72,8 @@ def render_spectators(pme, Options, SharedRuntime=None):
             _spec_cache,
             enabled=_spec_enabled,
             screen_size=(globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT),
+            pos_x_pct=_spec_pos_x,
+            pos_y_pct=_spec_pos_y,
             font_path=_find_overlay_font(),
             font_id=_ensure_raylib_font(),
             font_handle=_get_overlay_font_handle(16),
@@ -139,10 +154,17 @@ def render_noscopedot(pme, processHandle, clientBaseAddress, Offsets, Options):
     noscopedot.draw_cfg(pme, processHandle, clientBaseAddress, Offsets, _dot_cfg)
 
 
-def render_static(pme, processHandle, clientBaseAddress, Offsets, Options, SharedRuntime=None):
-    """Единая точка входа статичного слоя для ESP_Update."""
-    render_spectators(pme, Options, SharedRuntime)
-    render_crosshair(pme, processHandle, clientBaseAddress, Offsets, Options)
-    render_noscopedot(pme, processHandle, clientBaseAddress, Offsets, Options)
+def render_active_list(pme, Options, screen_size=None):
+    """Панель "Активные функции" (v8.4): делегирует features/active_list.
+    core.py зовёт через static_layer (тот же паттерн, что у зрителей).
+    active_list сам гейтит EnableActiveList/ActiveListVisible и ловит
+    исключения; отрисовка идёт только при подключённой игре (begin/end
+    drawing в ESP_Update)."""
+    if screen_size is None:
+        try:
+            screen_size = (globals.SCREEN_WIDTH, globals.SCREEN_HEIGHT)
+        except Exception:
+            screen_size = None
+    active_list.render_active_list(pme, Options, screen_size=screen_size)
 
 

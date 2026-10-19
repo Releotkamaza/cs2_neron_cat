@@ -1,7 +1,6 @@
 import os
 import json
 
-import globals
 from functions import memfuncs
 from functions import calculations
 
@@ -140,6 +139,22 @@ def _weapon_index(proc, client_base, local_pawn, o, sch):
         return None
 
 
+def _noscope_dot_enabled(Options):
+    """Точка рисуется только в режиме "Точка" (мультипозиционный тумблер
+    NoScopeCrosshairMode). Фоллбек на старый bool EnableNoScopeDot, если
+    режим ещё не мигрирован."""
+    try:
+        mode = Options.get("NoScopeCrosshairMode")
+    except Exception:
+        mode = None
+    if mode is None:
+        try:
+            return bool(Options.get("EnableNoScopeDot", False))
+        except Exception:
+            return False
+    return str(mode or "Выкл") == "Точка"
+
+
 def build_cfg(Options):
     """Кэшируемые параметры точки (цвет/прозрачность/радиус/наличие).
     Как и у кастомного прицела: эти значения меняются ТОЛЬКО из окна чита,
@@ -160,7 +175,7 @@ def build_cfg(Options):
     except Exception:
         color = "#FFFFFF"
     return {
-        "enabled": bool(Options.get("EnableNoScopeDot", False)),
+        "enabled": _noscope_dot_enabled(Options),
         "radius": radius,
         "opacity": opacity,
         "color": _dot_color(color),
@@ -172,7 +187,7 @@ def refresh_flags(cfg, Options):
     вне GUI. Геометрия (цвет/радиус/прозрачность) не трогается: вне
     открытого окна она не меняется."""
     try:
-        cfg["enabled"] = bool(Options.get("EnableNoScopeDot", False))
+        cfg["enabled"] = _noscope_dot_enabled(Options)
     except Exception:
         pass
     return cfg

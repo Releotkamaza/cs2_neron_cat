@@ -1,9 +1,14 @@
-dearpygui>=2.0.0
-keyboard==0.13.5
-pymem==1.14.0
-pypresence==4.3.0
-pyserial==3.5
-pywin32>=310
+# Ядро: RPM/WPM, оверлей (raylib), чтение дампов оффсетов
+pyMeow==1.73.42
+Pymem==1.14.0
+dearpygui==2.3.1
+pywin32>=312
 requests==2.32.5
-pillow
-comtypes
+# PIL/Pillow: ленивые импорты в functions/textrender.py (рендер кириллицы)
+pillow>=10.0.0
+# Прямые зависимости, используемые кодом:
+#   - keyboard: глобальные хоткеи (insert/home/end)
+#   - pymeow уже тянет raylib-биндинги сам
+# Убраны как неиспользуемые в коде: pypresence (Discord RPC), pyserial,
+# comtypes.
+keyboard>=0.13.5
